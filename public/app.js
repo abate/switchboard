@@ -77,6 +77,37 @@ function setActiveSession(id) {
   else sessionStorage.removeItem('activeSessionId');
   // Update file panel to show this session's open files/diffs
   if (typeof switchPanel === 'function') switchPanel(id);
+  reportActivityFocus();
+}
+
+// see .ai/contexts/activitywatch.md ("Attention")
+function reportActivityFocus() {
+  if (!window.api || typeof window.api.reportActivityFocus !== 'function') return;
+  const terminalShown = !terminalArea || terminalArea.style.display !== 'none';
+  if (!activeSessionId || !document.hasFocus() || !terminalShown) { window.api.reportActivityFocus(null); return; }
+  const s = sessionMap.get(activeSessionId) || {};
+  window.api.reportActivityFocus({
+    sessionId: activeSessionId,
+    // see .ai/contexts/activitywatch.md ("What reaches the server")
+    name: cleanDisplayName(s.name || s.aiTitle) || '',
+    project: s.projectPath || '',
+  });
+}
+// see .ai/contexts/activitywatch.md ("Running")
+function reportActivityTitles() {
+  if (!window.api || typeof window.api.reportActivityTitles !== 'function') return;
+  const list = [];
+  for (const id of openSessions.keys()) {
+    const s = sessionMap.get(id) || {};
+    list.push({ sessionId: id, name: cleanDisplayName(s.name || s.aiTitle) || '' });
+  }
+  window.api.reportActivityTitles(list);
+}
+window.addEventListener('focus', reportActivityFocus);
+window.addEventListener('blur', reportActivityFocus);
+// see .ai/contexts/activitywatch.md ("Attention")
+if (terminalArea && typeof MutationObserver === 'function') {
+  new MutationObserver(reportActivityFocus).observe(terminalArea, { attributes: true, attributeFilter: ['style'] });
 }
 // Persist slug group expand state across reloads
 function getExpandedSlugs() {
@@ -952,6 +983,8 @@ async function loadProjects({ resort = false } = {}) {
   loadingStatus.className = '';
   dedup(cachedProjects);
   dedup(cachedAllProjects);
+  reportActivityFocus(); // see .ai/contexts/activitywatch.md ("Attention")
+  reportActivityTitles();
 
   // Reconcile pending sessions: remove ones that now have real data
   let hasReinjected = false;
