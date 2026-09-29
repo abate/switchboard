@@ -12,6 +12,7 @@ const RESCAN_STATUS = 'idle';
 const FLUSH_MS = 150;
 const MIN_RESCAN_INTERVAL_MS = 1000;
 const MAX_SEEDED_FILES = 200;
+const MAX_LIVE_QUERY_IDS = 200;
 const GET_STATUS_PROBE_THROTTLE_MS = 5000;
 
 let dir = DEFAULT_DIR;
@@ -19,6 +20,9 @@ let activeSessions = null;
 let onIdle = null;
 let log = null;
 let isProcessAlive = defaultIsProcessAlive;
+let readProcStart = defaultReadProcStart;
+let readParentPid = defaultReadParentPid;
+let ownPid = process.pid;
 let now = Date.now;
 
 let watcher = null;
@@ -39,12 +43,47 @@ function defaultIsProcessAlive(pid) {
   }
 }
 
+function defaultReadParentPid(pid) {
+  if (process.platform !== 'linux') return null;
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+    return Number.isInteger(ppid) && ppid > 0 ? ppid : null;
+  } catch {
+    return null;
+  }
+}
+
+// see .ai/contexts/cli-session-state.md ("Live elsewhere")
+function descendsFromThisProcess(pid) {
+  let current = pid;
+  for (let depth = 0; depth < 64 && current && current > 1; depth++) {
+    if (current === ownPid) return true;
+    current = readParentPid(current);
+  }
+  return false;
+}
+
+function defaultReadProcStart(pid) {
+  if (process.platform !== 'linux') return null;
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    return fields[19] || null;
+  } catch {
+    return null;
+  }
+}
+
 function init(ctx) {
   dir = ctx.dir || DEFAULT_DIR;
   activeSessions = ctx.activeSessions;
   onIdle = ctx.onIdle;
   log = ctx.log || { info() {}, debug() {}, warn() {}, error() {} };
   isProcessAlive = ctx.isProcessAlive || defaultIsProcessAlive;
+  readProcStart = ctx.readProcStart || defaultReadProcStart;
+  readParentPid = ctx.readParentPid || defaultReadParentPid;
+  ownPid = ctx.ownPid || process.pid;
   now = ctx.now || Date.now;
   stop();
 }
@@ -215,8 +254,68 @@ function getStatus(sessionId) {
   return { status: entry.status, statusUpdatedAt: entry.statusUpdatedAt };
 }
 
+// On-demand scan, independent of the watcher -- see .ai/contexts/cli-session-state.md ("Live elsewhere")
+function scanLiveProcesses(sessionIds, exclude) {
+  const found = new Map();
+  if (sessionIds.size === 0) return found;
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return found; }
+  for (const name of names) {
+    if (found.size === sessionIds.size) break;
+    if (!STATE_FILE_RE.test(name)) continue;
+    let raw;
+    try { raw = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch { continue; }
+    if (!raw || typeof raw !== 'object' || !sessionIds.has(raw.sessionId) || found.has(raw.sessionId)) continue;
+    if (!Number.isInteger(raw.pid) || raw.pid <= 0) continue;
+    if (!isProcessAlive(raw.pid)) continue;
+    if (exclude(raw.pid)) continue;
+    if (raw.procStart != null) {
+      const actual = readProcStart(raw.pid);
+      if (actual != null && String(actual) !== String(raw.procStart)) continue;
+    }
+    found.set(raw.sessionId, {
+      pid: raw.pid,
+      cwd: typeof raw.cwd === 'string' ? raw.cwd : null,
+      startedAt: Number.isFinite(raw.startedAt) ? raw.startedAt : null,
+    });
+  }
+  return found;
+}
+
+function findLiveProcess(sessionId, { exclude = () => false } = {}) {
+  if (typeof sessionId !== 'string' || !sessionId) return null;
+  return scanLiveProcesses(new Set([sessionId]), exclude).get(sessionId) || null;
+}
+
+function ownProcessFilter(ptyPids) {
+  const own = new Set(ptyPids());
+  return (pid) => own.has(pid) || descendsFromThisProcess(pid);
+}
+
+function liveElsewhere(sessionId, hasPty, ptyPids = () => []) {
+  if (typeof sessionId !== 'string' || !sessionId) return null;
+  if (hasPty(sessionId)) return null;
+  return findLiveProcess(sessionId, { exclude: ownProcessFilter(ptyPids) });
+}
+
+function liveElsewhereMany(sessionIds, hasPty, ptyPids = () => []) {
+  const result = {};
+  if (!Array.isArray(sessionIds)) return result;
+  const wanted = new Set();
+  for (const id of sessionIds) {
+    if (wanted.size >= MAX_LIVE_QUERY_IDS) break;
+    if (typeof id === 'string' && id && !hasPty(id)) wanted.add(id);
+  }
+  for (const [id, live] of scanLiveProcesses(wanted, ownProcessFilter(ptyPids))) result[id] = live;
+  return result;
+}
+
 module.exports = {
   init,
+  findLiveProcess,
+  liveElsewhere,
+  liveElsewhereMany,
+  MAX_LIVE_QUERY_IDS,
   ensureWatching,
   stop,
   parseState,
