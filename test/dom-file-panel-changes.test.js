@@ -173,6 +173,7 @@ function setupFilePanelDom({ statusImpl, diffImpl, fileImpl, saveImpl, confirmIm
   evalInWindow(dom, path.join(PUBLIC_DIR, 'session-state.js'));
   evalInWindow(dom, path.join(PUBLIC_DIR, 'session-activity-dom.js'));
   evalInWindow(dom, path.join(PUBLIC_DIR, 'session-activity.js'));
+  evalInWindow(dom, path.join(PUBLIC_DIR, 'header-controls.js'));
   evalInWindow(dom, path.join(PUBLIC_DIR, 'file-panel.js'));
 
   window.initFilePanel();
@@ -675,10 +676,54 @@ test('the Changes header button opens and closes the tab for the active session'
     await flush();
     assert.equal(ctx.calls.status.length, 1);
     assert.equal(ctx.document.getElementById('file-panel').classList.contains('open'), true);
+    assert.equal(btn.classList.contains('active'), true, 'the toggle shows the tab is open');
+    assert.equal(btn.getAttribute('aria-pressed'), 'true');
 
     btn.click();
     assert.equal(ctx.document.getElementById('file-panel').classList.contains('open'), false);
+    assert.equal(btn.classList.contains('active'), false, 'the toggle shows the tab is closed');
+    assert.equal(btn.getAttribute('aria-pressed'), 'false');
   } finally { ctx.destroy(); }
+});
+
+test('the Changes toggle follows the session the header shows', async () => {
+  const ctx = setupFilePanelDom();
+  try {
+    ctx.window.switchPanel('s1');
+    const btn = ctx.document.getElementById('changes-toggle-btn');
+    btn.click();
+    await flush();
+    assert.equal(btn.classList.contains('active'), true);
+
+    ctx.window.switchPanel('s2');
+    assert.equal(btn.classList.contains('active'), false, 's2 has no Changes tab open');
+
+    ctx.window.switchPanel('s1');
+    assert.equal(btn.classList.contains('active'), true, 's1 still has its Changes tab');
+  } finally { ctx.destroy(); }
+});
+
+test('the Changes toggle stays off while the panel shows a file or an MCP diff', async () => {
+  for (const takeover of ['file', 'diff']) {
+    const ctx = setupFilePanelDom();
+    try {
+      ctx.window.switchPanel('s1');
+      const btn = ctx.document.getElementById('changes-toggle-btn');
+      btn.click();
+      await flush();
+      assert.equal(btn.classList.contains('active'), true);
+
+      if (takeover === 'file') {
+        ctx.window.openFileTab('s1', { filePath: '/repo/other.js', content: 'other' });
+      } else {
+        ctx.window.openDiffTab('s1', 'd1', { oldFilePath: '/repo/other.js', oldContent: 'a\n', newContent: 'b\n' });
+      }
+      await flush();
+      assert.equal(ctx.document.getElementById('file-panel').classList.contains('open'), true, `the ${takeover} tab is shown`);
+      assert.equal(btn.classList.contains('active'), false, `a ${takeover} tab is not the Changes tab`);
+      assert.equal(btn.getAttribute('aria-pressed'), 'false');
+    } finally { ctx.destroy(); }
+  }
 });
 
 // --- Editing in place ----------------------------------------------------
