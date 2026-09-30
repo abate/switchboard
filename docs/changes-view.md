@@ -32,10 +32,12 @@ the plain file viewer.
 
 - A header: `N files changed +A −B`, the branch, and how far it is ahead of or
   behind its upstream.
-- One row per file: a state letter (`M` modified, `A` added, `D` deleted, `R`/`C`
-  renamed/copied, `?` untracked), the path, and its `+added −deleted` counts —
-  or a marker saying why it has none (see [Counts for new files](#counts-for-new-files)).
-  A new directory is listed file by file.
+- One row per file: a state badge (`M` modified, `A` added, `D` deleted, `R`/`C`
+  renamed/copied, `U` unmerged, `?` untracked — hover it for the word), the
+  path, and its `+added −deleted` counts in green and red on the row's muted
+  metadata — or a marker saying why it has none (see
+  [Counts for new files](#counts-for-new-files)). The header and the rows
+  form one card, like a project in the sidebar. A new directory is listed file by file.
 - At most 500 rows, then `+N more files not shown`; the header still counts
   every file. Tracked changes come first, so what is cut is untracked files.
   When a working tree holds tens of thousands of untracked files, the untracked
@@ -76,10 +78,16 @@ the file may have changed.
 
 On a local session the open file is an editor. The diff recomputes as you type.
 
-- **Save**, or `Ctrl+S` / `Cmd+S`, writes the file; the button is inactive until
-  something changed. The list refreshes after a save.
+The file's toolbar has four icon buttons, each named by its tooltip: **Close**
+(the cross), the view mode, **Reload** (the counter-clockwise arrow) and
+**Save** (the disk).
+
+- **Save**, or `Ctrl+S` / `Cmd+S`, writes the file; the button is dimmed and
+  inactive until something changed, and lit once there is something to save.
+  The list refreshes after a save.
 - The button next to **Close** cycles three views, remembered
-  (`localStorage.changesDiffMode`): **Inline** (the default: one column, changes
+  (`localStorage.changesDiffMode`); its icon shows the view you are in and its
+  tooltip names the next: **Inline** (the default: one column, changes
   marked), **Plain** (the file alone) and **Side-by-side** (the version git
   compares against on the left, read-only; the working copy on the right).
 - The left-hand side is what `git diff` compares against: the staged version for
