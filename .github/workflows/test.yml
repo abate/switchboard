@@ -28,6 +28,21 @@ jobs:
       - name: Run ESLint
         run: npm run lint
 
+  changelog:
+    # see docs/changelog.md ("The CI check")
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require a CHANGELOG.md entry for app changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-changelog.js --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}" --repo "${{ github.repository }}" --pr "${{ github.event.pull_request.number }}"
+
   test:
     runs-on: ${{ matrix.os }}
 

@@ -38,6 +38,7 @@ const { state: TRACE, trace, codePoints, controlOffset, busyDecision, progressDe
 
 const { classifyTitleActivity } = require('./classify-title-activity');
 const { windowFrameOptions, applicationMenuTemplate, zoomKey, nextZoomLevel, menuPopupPoint } = require('./window-frame');
+const { createWhatsNew } = require('./changelog');
 
 try { require('electron-reloader')(module, { watchRenderer: true }); } catch {};
 
@@ -154,6 +155,9 @@ const {
   closeDb,
   DB_PATH,
 } = require('./db');
+
+// see docs/changelog.md ("What's new in the app")
+const INSTALL_PREDATES_LAUNCH = getSetting('global') !== null || isInitialScanComplete();
 
 // The trace file sits next to switchboard.db — DB_PATH is the one resolution
 // of SWITCHBOARD_DATA_DIR, never re-derived here.
@@ -432,8 +436,29 @@ function createWindow() {
 }
 
 function buildMenu() {
-  Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate(app.name)));
+  Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate(app.name, { onWhatsNew: showWhatsNewFromMenu })));
 }
+
+// --- What's new (see docs/changelog.md) ---
+
+const whatsNew = createWhatsNew({
+  getSetting,
+  setSetting,
+  currentVersion: app.getVersion(),
+  existingInstall: INSTALL_PREDATES_LAUNCH,
+  lastSeenDefault: SETTING_DEFAULTS.lastSeenVersion,
+  readChangelog: () => fs.readFileSync(path.join(__dirname, 'CHANGELOG.md'), 'utf8'),
+  log,
+});
+
+function showWhatsNewFromMenu() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const payload = whatsNew.forMenu();
+  if (payload) mainWindow.webContents.send('show-whats-new', payload);
+}
+
+ipcMain.handle('whats-new-startup', () => whatsNew.startup());
+ipcMain.handle('whats-new-dismissed', () => whatsNew.dismissed());
 
 // --- Session cache helpers ---
 
