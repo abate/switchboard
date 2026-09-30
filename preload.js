@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('api', {
   getWorkFiles: () => ipcRenderer.invoke('get-work-files'),
   readWorkFile: (filePath) => ipcRenderer.invoke('read-work-file', filePath),
   deleteWorkFile: (filePath) => ipcRenderer.invoke('delete-work-file', filePath),
+  getIndexingState: () => ipcRenderer.invoke('get-indexing-state'),
   getProjects: (showArchived) => ipcRenderer.invoke('get-projects', showArchived),
   rebuildCache: () => ipcRenderer.invoke('rebuild-cache'),
   getActiveSessions: () => ipcRenderer.invoke('get-active-sessions'),
@@ -137,6 +138,9 @@ contextBridge.exposeInMainWorld('api', {
   },
   onIndexingProgress: (callback) => {
     ipcRenderer.on('indexing-progress', (_event, payload) => callback(payload));
+  },
+  onIndexingFinished: (callback) => {
+    ipcRenderer.on('indexing-finished', () => callback());
   },
   onFullScreenChanged: (callback) => {
     ipcRenderer.on('full-screen-changed', (_event, isFullScreen) => callback(isFullScreen));

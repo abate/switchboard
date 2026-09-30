@@ -642,6 +642,17 @@ function sendIndexingProgress(payload) {
   }
 }
 
+let indexingFinished = false;
+function isIndexingFinished() { return indexingFinished; }
+
+function sendIndexingFinished() {
+  indexingFinished = true;
+  const mw = getMainWindow();
+  if (mw && !mw.isDestroyed()) {
+    mw.webContents.send('indexing-finished');
+  }
+}
+
 /** Persist one `{type:'folder'}` result from workers/scan-projects.js.
  *  Delete-then-insert, so re-scanning an already-written folder never
  *  duplicates rows. `folder` already carries the `<alias>::` prefix when the
@@ -795,6 +806,7 @@ function populateCacheViaWorker() {
   // interruption; it flips true only via setInitialScanComplete() on the
   // worker's final successful done message below.
   const coldStart = !isInitialScanComplete();
+  indexingFinished = false;
   sendStatus('Scanning projects…', 'active');
 
   let scannedFolders = 0;
@@ -810,7 +822,10 @@ function populateCacheViaWorker() {
   let lastProgressAt = 0;
 
   const reportProgress = (done, error) => {
-    if (!coldStart) return;
+    if (!coldStart) {
+      if (done) sendIndexingFinished();
+      return;
+    }
     const now = Date.now();
     if (!done && lastProgressAt !== 0 && now - lastProgressAt < PROGRESS_THROTTLE_MS) return;
     lastProgressAt = now;
@@ -822,6 +837,7 @@ function populateCacheViaWorker() {
       done,
       ...(error ? { error } : {}),
     });
+    if (done) sendIndexingFinished();
   };
 
   populatePromise = new Promise((resolve) => {
@@ -916,6 +932,7 @@ module.exports = {
   notifyRendererProjectsChanged,
   sendStatus,
   populateCacheViaWorker,
+  isIndexingFinished,
   scanFoldersViaWorker,
   setRemoteRoots,
   getRemoteRoots,
