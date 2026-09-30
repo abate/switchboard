@@ -6,6 +6,12 @@ What changes for you in each release of Switchboard. How to write an entry: [doc
 
 ### New
 - A schedule with `catch-up: true` in its front matter runs once, as soon as Switchboard starts or the machine wakes up, when it fell due while Switchboard was closed or the machine asleep, however many runs were missed in the last seven days. Without it, a missed run is still skipped. (#334)
+### Fixed
+- A sandboxed session can no longer leave behind something that runs outside the sandbox later: in `~/.claude` and in every `.claude` of the project, worktrees included, only the session's own state (its transcripts, todos, credentials) stays writable, each repository's config and hooks are read-only, other sessions' shell snapshots and session hooks are out of its reach, and its changes to `~/.claude.json`, where the MCP servers are, are dropped when it ends. A new `.git/commondir`, or a repository or worktree the session creates, still carries config and hooks git will follow. Change settings, permissions, plugins and MCP servers outside the sandbox; the Sandbox indicator's tooltip lists what stays writable. (#358)
+- A schedule runs only in a project where Switchboard launched a session, or that you added with Add project; open a session once in a project whose schedules it never ran. Schedules you already have keep running. A sandboxed schedule is sandboxed by the nearest project setting above it, and one whose `add-dirs` include a directory under your home that is not such a project is skipped, with the reason in the main log. (#358)
+- A project that gets its first schedule after this change does not run it until you have opened a session in that project or added it with Add project; a schedule is no longer picked up just because its file appears in a project Switchboard has never recorded. (#372)
+- The podman socket is no longer bound into the sandbox by default: through it a session can mount any host path into a container. Put `SWITCHBOARD_SANDBOX_PODMAN=1` in the Pre-launch Command to bind it. (#358)
+- A sandboxed session reaches the API when `/etc/resolv.conf` links into `/run`, as with systemd-resolved on Ubuntu. (#367)
 
 ### Changed
 - Without `SWITCHBOARD_SSH_PATH`, the terminal attached to a remote session now runs the `ssh` found on your `PATH` before `/usr/bin/ssh` or the Windows system client, like every other remote operation. `SWITCHBOARD_SSH_PATH` must be an absolute path: a relative one is ignored, with a warning in the log. (#359)
