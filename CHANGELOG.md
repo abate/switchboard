@@ -4,6 +4,11 @@ What changes for you in each release of Switchboard. How to write an entry: [doc
 
 ## Unreleased
 
+### New
+- A remote host's project header now shows what the host supports: hover its status dot to see the highest capability reached (observe, liveness, inject, attach) and, for each one above it, why it is missing. (#218)
+
+### Changed
+- After three failed refreshes of a remote host in a row, a row that would have attached opens its transcript and says why in its tooltip, instead of failing when clicked. Stop is never disabled: it runs its own ssh. (#218)
 ### Fixed
 - A step of a trigger chain that follows `/compact` now waits for the CLI to be back at its prompt before it is written, and a step whose Enter did not start a turn is retried once and then reported as "not confirmed submitted" in the log and the result instead of "sent". (#407)
 - Stopping a terminal twice in quick succession, or resizing it while it is being stopped, no longer closes the Windows pseudo console twice, which could kill the whole app with no error. (#405)

@@ -82,6 +82,7 @@ const { handleTerminalInput } = require('./terminal-input');
 const { createTriggerContext } = require('./trigger-context');
 const { createTmuxAttachAdapter } = require('./remote-attach');
 const { createRemoteStopAdapter } = require('./remote-stop');
+const { attachBlockReason } = require('./remote-host-profile');
 const { createRemoteSendAdapter, handleSendRequest } = require('./remote-send');
 const { createGitChangesRunner, localGitEnv } = require('./git-changes-runner');
 const { runToExit } = require('./run-to-exit');
@@ -569,8 +570,9 @@ function annotateRemoteAttachable(projects) {
   function hostInfo(alias) {
     if (!hostInfoByAlias.has(alias)) {
       const { sessions, at, error } = remoteIndexer.getRemoteSessions(alias);
-      const { nextAttemptAt } = remoteIndexer.getRemoteHostState(alias);
-      hostInfoByAlias.set(alias, { at, error, nextAttemptAt, byId: new Map(sessions.map(d => [d.sessionId, d])) });
+      const { nextAttemptAt, consecutiveFailures } = remoteIndexer.getRemoteHostState(alias);
+      const profile = remoteIndexer.getRemoteHostProfile(alias);
+      hostInfoByAlias.set(alias, { at, error, nextAttemptAt, consecutiveFailures, profile, byId: new Map(sessions.map(d => [d.sessionId, d])) });
     }
     return hostInfoByAlias.get(alias);
   }
@@ -580,11 +582,16 @@ function annotateRemoteAttachable(projects) {
       project.remoteHostAt = info.at;
       project.remoteHostError = info.error;
       project.remoteHostNextAttemptAt = info.nextAttemptAt || null;
+      project.remoteHostProfile = info.profile;
     }
     for (const session of project.sessions) {
       if (session.remoteAlias) {
-        const descriptor = hostInfo(session.remoteAlias).byId.get(session.sessionId);
-        session.remoteAttachable = !!(descriptor && remoteAttachAdapter.supports(descriptor));
+        const info = hostInfo(session.remoteAlias);
+        const descriptor = info.byId.get(session.sessionId);
+        const hostBlocked = attachBlockReason(info.profile, info.consecutiveFailures);
+        const supportsAttach = !!(descriptor && remoteAttachAdapter.supports(descriptor));
+        session.remoteAttachable = supportsAttach && !hostBlocked;
+        session.remoteAttachBlocked = supportsAttach ? hostBlocked : null;
         session.status = descriptor ? (descriptor.status || null) : null;
         session.statusUpdatedAt = descriptor ? (descriptor.statusUpdatedAt || null) : null;
         session.waitingFor = descriptor ? (descriptor.waitingFor || null) : null;
