@@ -39,6 +39,8 @@ const { state: TRACE, trace, codePoints, controlOffset, busyDecision, progressDe
 const { classifyTitleActivity } = require('./classify-title-activity');
 const { windowFrameOptions, applicationMenuTemplate, zoomKey, nextZoomLevel, menuPopupPoint } = require('./window-frame');
 const { createWhatsNew } = require('./changelog');
+const { createUnsavedGuard } = require('./unsaved-guard');
+const unsavedGuard = createUnsavedGuard({ ipcMain, quit: () => app.quit() });
 const { cleanEnv } = require('./clean-env');
 
 try { require('electron-reloader')(module, { watchRenderer: true }); } catch {};
@@ -356,6 +358,8 @@ function createWindow() {
       void 0;
     `);
   });
+
+  unsavedGuard.attach(mainWindow);
 
   // Prevent Cmd+R / Ctrl+Shift+R from reloading the page (Chromium built-in).
   // Ctrl+R alone on macOS is NOT a reload shortcut and must pass through to xterm
@@ -3025,9 +3029,10 @@ ipcMain.handle('updater-download', () => {
   if (!autoUpdater) return;
   return autoUpdater.downloadUpdate();
 });
-ipcMain.handle('updater-install', () => {
-  activityFlushedForQuit = true; // see .ai/contexts/activitywatch.md ("Quitting")
+ipcMain.handle('updater-install', async () => {
   if (!autoUpdater) return;
+  if (mainWindow && !(await unsavedGuard.confirmQuit(mainWindow))) return;
+  activityFlushedForQuit = true; // see .ai/contexts/activitywatch.md ("Quitting")
   autoUpdater.quitAndInstall();
 });
 
@@ -3221,6 +3226,7 @@ app.on('window-all-closed', () => {
 
 // see .ai/contexts/activitywatch.md ("Quitting")
 app.on('before-quit', (event) => {
+  if (unsavedGuard.beforeQuit(event, mainWindow)) return;
   if (!activityFlushedForQuit && activityReporter.hasPendingWork) {
     event.preventDefault();
     activityFlushedForQuit = true;
