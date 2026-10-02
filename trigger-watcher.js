@@ -88,6 +88,11 @@ const SUBMITTED_RANK      = {
 
 const ERROR_NOT_SENT      = 'not sent';
 const ERROR_CHAIN_TIMEOUT = 'chain timeout';
+const ERROR_UNCONFIRMED  = 'step not confirmed';
+const REASON_DIALOG_OPEN  = 'the CLI reports a dialog open (waiting); nothing was written into it';
+const REASON_DEADLINE_BEFORE_WRITE = 'the step deadline passed before it could be written; nothing was written';
+const REASON_CLI_BUSY     = 'the CLI still reported a turn running (busy) at the deadline; nothing was written';
+const REASON_CLI_NOT_IDLE = 'the CLI never reported idle before the deadline; nothing was written';
 
 const ACCEPTED_WAITS = ['idle', 'none'];
 
@@ -341,13 +346,6 @@ function pollForBusyObserved(sessionId, ctx, windowMs, deadlineMs, probe) {
   });
 }
 
-// see .ai/contexts/trigger-watcher.md, "Readiness and edge proof from the CLI descriptor"
-const DEFAULT_CLI_READY_WAIT_MS = 60_000; // ms
-function getCliReadyWaitMs() {
-  const v = envNumber('SWITCHBOARD_CLI_READY_WAIT_MS');
-  return v !== undefined ? v : DEFAULT_CLI_READY_WAIT_MS;
-}
-
 function readCliStatusRaw(ctx, sessionId) {
   if (typeof ctx.getCliStatus !== 'function') return null;
   try {
@@ -379,31 +377,47 @@ function cliForbidsRecoveryEnter(ctx, sessionId) {
   return !!s && (s.status === 'waiting' || s.status === 'busy');
 }
 
-/**
- * Wait until the CLI's own descriptor reports "idle" with a statusUpdatedAt
- * later than `afterMs`, bounded by `deadlineMs`.
- *
- * Returns { ready, available, timedOut, sessionExited, waited_ms }. `available:
- * false` means no descriptor could be read (at the start or later): the caller
- * keeps its pre-descriptor behaviour.
- */
-function waitForCliIdleAfter(sessionId, ctx, afterMs, deadlineMs) {
+// see .ai/contexts/trigger-watcher.md, "Readiness before every step" (return shape, descriptor loss, deadline)
+function waitForCliIdleAfter(sessionId, ctx, afterMs, deadlineMs, settleMs = 0) {
   const start = Date.now();
+  let idleSince = null;
+  let idleStamp = null;
+  let lastStatus = null;
+  let lastWaitingAt = null;
+  let everRead = false;
   return pollLoop((resolve, scheduleNext) => {
     const now = Date.now();
     const waited_ms = now - start;
+    const waitingSeen = lastWaitingAt !== null && now - lastWaitingAt <= settleMs;
     if (!ctx.getPtyForSession(sessionId)) {
-      return resolve({ ready: false, available: true, timedOut: false, sessionExited: true, waited_ms });
+      return resolve({ ready: false, available: true, timedOut: false, sessionExited: true, waited_ms, lastStatus, waitingSeen });
     }
     const s = readCliStatus(ctx, sessionId);
-    if (!s) {
-      return resolve({ ready: false, available: false, timedOut: false, sessionExited: false, waited_ms });
+    if (!s && !everRead) {
+      return resolve({ ready: false, available: false, timedOut: false, sessionExited: false, waited_ms, lastStatus, waitingSeen });
     }
-    if (s.status === 'idle' && Number.isInteger(s.statusUpdatedAt) && s.statusUpdatedAt > afterMs) {
-      return resolve({ ready: true, available: true, timedOut: false, sessionExited: false, waited_ms });
+    let idleHeld = false;
+    if (!s) {
+      idleSince = null;
+    } else {
+      everRead = true;
+      lastStatus = s.status;
+      if (s.status === 'waiting') lastWaitingAt = now;
+      if (s.status === 'idle' && s.statusUpdatedAt > afterMs) {
+        if (idleSince === null || idleStamp !== s.statusUpdatedAt) {
+          idleSince = now;
+          idleStamp = s.statusUpdatedAt;
+        }
+        idleHeld = now - idleSince >= settleMs;
+      } else {
+        idleSince = null;
+      }
+    }
+    if (idleHeld && now < deadlineMs) {
+      return resolve({ ready: true, available: true, timedOut: false, sessionExited: false, waited_ms, lastStatus, waitingSeen });
     }
     if (now >= deadlineMs) {
-      return resolve({ ready: false, available: true, timedOut: true, sessionExited: false, waited_ms });
+      return resolve({ ready: false, available: true, timedOut: true, sessionExited: false, waited_ms, lastStatus, waitingSeen: lastWaitingAt !== null && now - lastWaitingAt <= settleMs });
     }
     scheduleNext();
   });
@@ -466,6 +480,7 @@ async function submitWithVerify(handle, sessionId, command, ctx, deadlineMs) {
   const first = await pollForBusyObserved(sessionId, ctx, windowMs, effectiveDeadline, probe);
   if (first.sawBusy || first.sessionExited || first.timedOut) {
     return {
+      enterAt,
       submit_retries: 0,
       sawBusy: first.sawBusy,
       confirmed: edgeMode ? first.sawBusy : null,
@@ -483,6 +498,7 @@ async function submitWithVerify(handle, sessionId, command, ctx, deadlineMs) {
   const recoveryDeadline = Math.min(effectiveDeadline, Date.now() + windowMs);
   if (cliForbidsRecoveryEnter(ctx, sessionId)) {
     return {
+      enterAt,
       submit_retries: 0,
       sawBusy: false,
       confirmed: edgeMode ? false : null,
@@ -497,6 +513,7 @@ async function submitWithVerify(handle, sessionId, command, ctx, deadlineMs) {
   const polite = await waitForComposerFree(sessionId, ctx, recoveryDeadline);
   if (!polite.free) {
     return {
+      enterAt,
       submit_retries: 0,
       sawBusy: false,
       confirmed: edgeMode ? false : null,
@@ -514,6 +531,7 @@ async function submitWithVerify(handle, sessionId, command, ctx, deadlineMs) {
   } catch (err) {
     // Surface as a sessionExited-like failure; caller maps to an error result.
     return {
+      enterAt,
       submit_retries: 1,
       sawBusy: false,
       confirmed: edgeMode ? false : null,
@@ -527,6 +545,7 @@ async function submitWithVerify(handle, sessionId, command, ctx, deadlineMs) {
 
   const second = await pollForBusyObserved(sessionId, ctx, windowMs, effectiveDeadline, probe);
   return {
+    enterAt,
     submit_retries: 1,
     sawBusy: second.sawBusy,
     confirmed: edgeMode ? second.sawBusy : null,
@@ -550,9 +569,15 @@ async function submitWithVerify(handle, sessionId, command, ctx, deadlineMs) {
  *
  * see .ai/contexts/trigger-watcher.md, "waitForBusyFall waits for the rise too"
  *
+ * With `enterAtMs` and a usable descriptor, the descriptor is the authority: idle
+ * with a statusUpdatedAt at or after the Enter, held for the settle window,
+ * ends the wait whatever `isSessionBusy` says. Without one the level probe decides.
+ *
+ * see .ai/contexts/trigger-watcher.md, "Readiness before every step"
+ *
  * Returns { timedOut, sessionExited, waited_ms }.
  */
-function waitForBusyFall(sessionId, ctx, deadlineMs) {
+function waitForBusyFall(sessionId, ctx, deadlineMs, enterAtMs) {
   const start = Date.now();
   const settleMs = getBusyFallSettleMs();
   const riseDeadline = start + getBusyRiseWaitMs();
@@ -561,6 +586,8 @@ function waitForBusyFall(sessionId, ctx, deadlineMs) {
   // Set the instant busy first reads false (after having risen); reset to
   // null on every re-assertion.
   let idleSince = null;
+  let descIdleSince = null;
+  let descIdleStamp = null;
 
   return pollLoop((resolve, scheduleNext) => {
     const now = Date.now();
@@ -569,6 +596,18 @@ function waitForBusyFall(sessionId, ctx, deadlineMs) {
     }
     if (!ctx.getPtyForSession(sessionId)) {
       return resolve({ timedOut: false, sessionExited: true, waited_ms: now - start });
+    }
+    const desc = Number.isFinite(enterAtMs) ? readCliStatus(ctx, sessionId) : null;
+    if (desc && desc.status === 'idle' && desc.statusUpdatedAt >= enterAtMs) {
+      if (descIdleSince === null || descIdleStamp !== desc.statusUpdatedAt) {
+        descIdleSince = now;
+        descIdleStamp = desc.statusUpdatedAt;
+      }
+      if (now - descIdleSince >= settleMs) {
+        return resolve({ timedOut: false, sessionExited: false, waited_ms: now - start });
+      }
+    } else {
+      descIdleSince = null;
     }
     if (ctx.isSessionBusy(sessionId)) {
       hasRisen = true;
@@ -1192,7 +1231,6 @@ async function processTriggerFile(name, ctx, triggersDir, processedDir, onEntryR
     // Inject the step command
     const stepSentAt = new Date().toISOString();
     if (i === 0) step0SentAt = stepSentAt;
-    if (isCompactCommand(step.command)) compactSentAtMs = Date.parse(stepSentAt);
 
     // Per-step timeout_ms (if set) bounds THIS whole step (verify + retry + the
     // busy-fall wait for non-final steps), capped by the remaining global
@@ -1241,12 +1279,8 @@ async function processTriggerFile(name, ctx, triggersDir, processedDir, onEntryR
     }
 
     let readyWaitedMs = 0;
-    if (readyAfterMs !== null && !readCliStatus(ctx, sessionId)) {
-      ctx.log.info(`[trigger-watcher] No usable CLI descriptor for ${sessionId}, readiness wait skipped before chain step ${i}`);
-    }
-    if (readyAfterMs !== null && readCliStatus(ctx, sessionId)) {
-      const readyDeadline = Math.min(stepDeadline, Date.now() + getCliReadyWaitMs());
-      const ready = await waitForCliIdleAfter(sessionId, ctx, readyAfterMs, readyDeadline);
+    {
+      const ready = await waitForCliIdleAfter(sessionId, ctx, readyAfterMs === null ? -Infinity : readyAfterMs, stepDeadline, getBusyFallSettleMs());
       readyWaitedMs = ready.waited_ms;
       totalWaitedMs += readyWaitedMs;
       if (ready.sessionExited) {
@@ -1255,11 +1289,43 @@ async function processTriggerFile(name, ctx, triggersDir, processedDir, onEntryR
         return;
       }
       if (!ready.available) {
-        ctx.log.info(`[trigger-watcher] CLI descriptor vanished for ${sessionId}, readiness wait ended early before chain step ${i}`);
+        ctx.log.info(`[trigger-watcher] No usable CLI descriptor for ${sessionId} at the start of the readiness wait before chain step ${i}`);
       }
       if (ready.timedOut) {
-        ctx.log.warn(`[trigger-watcher] CLI not idle after /compact within ${readyWaitedMs} ms, writing chain step ${i} anyway:`, sessionId);
+        const dialog = ready.waitingSeen || ready.lastStatus === 'waiting';
+        const reason = dialog ? REASON_DIALOG_OPEN : (ready.lastStatus === 'busy' ? REASON_CLI_BUSY : REASON_CLI_NOT_IDLE);
+        ctx.log.warn(`[trigger-watcher] CLI not ready (${ready.lastStatus}) after ${readyWaitedMs} ms, chain step ${i} not written:`, sessionId);
+        steps.push({
+          idx: i, command: step.command, sent_at: stepSentAt, waited_ms: polite.waited_ms + readyWaitedMs,
+          submit_retries: 0, submitted: SUBMITTED_NO,
+        });
+        await writeResult({
+          ok: false,
+          submitted: weakestSubmitted(chainSubmitted, SUBMITTED_NO),
+          error: (i === 0) ? ERROR_NOT_SENT : ERROR_CHAIN_TIMEOUT,
+          reason,
+          partial: i > 0, steps_completed: i, sessionId, sent_at: step0SentAt, steps,
+          total_waited_ms: totalWaitedMs,
+        });
+        return;
       }
+    }
+
+    if (Date.now() >= stepDeadline) {
+      ctx.log.warn(`[trigger-watcher] Step deadline passed before chain step ${i} could be written:`, sessionId);
+      steps.push({
+        idx: i, command: step.command, sent_at: stepSentAt, waited_ms: polite.waited_ms + readyWaitedMs,
+        submit_retries: 0, submitted: SUBMITTED_NO,
+      });
+      await writeResult({
+        ok: false,
+        submitted: weakestSubmitted(chainSubmitted, SUBMITTED_NO),
+        error: (i === 0) ? ERROR_NOT_SENT : ERROR_CHAIN_TIMEOUT,
+        reason: REASON_DEADLINE_BEFORE_WRITE,
+        partial: i > 0, steps_completed: i, sessionId, sent_at: step0SentAt, steps,
+        total_waited_ms: totalWaitedMs,
+      });
+      return;
     }
 
     // Submit the step, then look for activity on the session.
@@ -1284,6 +1350,9 @@ async function processTriggerFile(name, ctx, triggersDir, processedDir, onEntryR
       ctx.log.error(`[trigger-watcher] PTY write failed at chain step ${i}:`, verify.writeError.message);
       await writeResult({ ok: false, error: 'pty write failed: ' + verify.writeError.message, partial: true, steps_completed: i, sessionId, sent_at: step0SentAt, steps, total_waited_ms: totalWaitedMs });
       return;
+    }
+    if (isCompactCommand(step.command)) {
+      compactSentAtMs = Number.isFinite(verify.enterAt) ? verify.enterAt : Date.parse(stepSentAt);
     }
     submitRetries = verify.submit_retries;
     stepWaitedMs += verify.waited_ms;
@@ -1322,6 +1391,19 @@ async function processTriggerFile(name, ctx, triggersDir, processedDir, onEntryR
       return;
     }
 
+    if (stepConfirmed === false && verify.recoverySkipped) {
+      steps.push({ idx: i, command: step.command, sent_at: stepSentAt, waited_ms: stepWaitedMs, submit_retries: submitRetries, submitted: stepSubmitted, submit_confirmed: false });
+      await writeResult({
+        ok: false,
+        submitted: chainSubmitted,
+        error: ERROR_UNCONFIRMED,
+        reason: `chain step ${i} was typed but its submission was not confirmed and the recovery Enter was withheld (${verify.recoveryReason}); nothing more was typed`,
+        partial: true, steps_completed: i, sessionId, sent_at: step0SentAt, steps,
+        total_waited_ms: totalWaitedMs,
+      });
+      return;
+    }
+
     // For non-final steps, wait for the turn to FINISH (busy falling edge).
     // submitWithVerify already consumed the observation. If busy was never
     // observed (instant-reply / unconfirmed submit), busy is already false,
@@ -1331,7 +1413,7 @@ async function processTriggerFile(name, ctx, triggersDir, processedDir, onEntryR
     // could not confirm a turn.
     if (i < chain.length - 1) {
       // Same per-step deadline as the verify above — bounds the busy-fall wait.
-      const result = await waitForBusyFall(sessionId, ctx, stepDeadline);
+      const result = await waitForBusyFall(sessionId, ctx, stepDeadline, verify.enterAt);
       stepWaitedMs += result.waited_ms;
       totalWaitedMs += result.waited_ms;
 
@@ -1521,4 +1603,4 @@ function start(ctx) {
   };
 }
 
-module.exports = { start, weakestSubmitted, SUBMITTED_RANK, normalizeCwd, submitWithVerify, waitForCliIdleAfter, isCompactCommand };
+module.exports = { start, weakestSubmitted, SUBMITTED_RANK, normalizeCwd, submitWithVerify, waitForCliIdleAfter, waitForBusyFall, isCompactCommand };
