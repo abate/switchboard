@@ -5,6 +5,7 @@ What changes for you in each release of Switchboard. How to write an entry: [doc
 ## Unreleased
 
 ### Fixed
+- Stopping a terminal twice in quick succession, or resizing it while it is being stopped, no longer closes the Windows pseudo console twice, which could kill the whole app with no error. (#405)
 - A sandboxed session, or a sandboxed schedule, whose Additional Directories include a `.claude` or `.git` directory, or a path inside one, is now refused instead of binding it read-write over its read-only protection; add the project directory instead. A session started in a `.claude` or `.git` directory is refused too, except below `.claude/worktrees`, and Additional Directories naming your home directory or a parent of it are refused however the path is written. A relative `add-dirs` entry in a schedule is taken from the schedule's directory. (#385)
 - A session that has exited no longer keeps a busy dot in the sidebar, and the status bar's running count drops as soon as the session ends instead of waiting for the next refresh. (#375)
 - Quitting, closing the window or reloading while a file in the file panel has unsaved edits now asks first, in any session, kept-aside tabs included: Save writes them (a file that changed on disk is not overwritten), Discard drops them, Cancel stays. If Switchboard does not answer within a few seconds, it closes anyway. (#373)
