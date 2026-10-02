@@ -4,6 +4,8 @@ What changes for you in each release of Switchboard. How to write an entry: [doc
 
 ## Unreleased
 
+### Fixed
+- On Windows, the file panel no longer opens or saves a credential file (such as one under `.ssh`) through its 8.3 short name or a `\\?\` path. (#390)
 ### New
 - A session's Changes panel also lists the changes in the worktrees its subagents are working in, under a header naming the agent and its branch. Those rows open as read-only diffs; a subagent that works in the session's own directory adds nothing. (#303)
 - A live session on a remote host that is not open in a terminal has a Send a prompt… button on its row: type a text and it is written to the running session as a new prompt, without attaching. It needs `ncat` or an OpenBSD `nc` on the host, and is refused for a Windows host. The dialog says "Sent": the session's own status shows whether it picked the prompt up. (#219)
