@@ -2198,7 +2198,11 @@ function sandboxBindEnv(dirs) {
 }
 
 // see .ai/contexts/session-cache.md ("Remote hosts — tmux attach")
+let ptyGenerationCounter = 0;
+
+// see .ai/contexts/session-state.md ("A session main drops")
 function wireSessionPty(session, sessionId, ptyProcess) {
+  session.generation = ++ptyGenerationCounter;
   ptyProcess.onData(data => {
     const currentId = session.realSessionId || sessionId;
 
@@ -2301,12 +2305,12 @@ function wireSessionPty(session, sessionId, ptyProcess) {
     const realId = session.realSessionId || sessionId;
     if (TRACE.on) trace('pty.exit', realId, { exitCode, signal: exitSignal, stopped, alsoUnder: realId !== sessionId ? sessionId : null, wasBusy: !!session._cliBusy, sent: !!(mainWindow && !mainWindow.isDestroyed()) });
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('process-exited', realId, exitCode, exitSignal, stopped);
+      mainWindow.webContents.send('process-exited', realId, exitCode, exitSignal, stopped, session.generation);
       // If a fork transition re-keyed this session under realId but the PTY
       // exited before transition detection ran, also notify the renderer for
       // the original sessionId so it doesn't stay stuck as "Running".
       if (realId !== sessionId && activeSessions.has(sessionId)) {
-        mainWindow.webContents.send('process-exited', sessionId, exitCode, exitSignal, stopped);
+        mainWindow.webContents.send('process-exited', sessionId, exitCode, exitSignal, stopped, session.generation);
       }
     }
     activeSessions.delete(realId);
@@ -2347,6 +2351,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
       ok: true, reattached: true, sandbox: !!session.sandbox,
       mcpState: session.mcpError ? 'failed' : getMcpState(session.realSessionId || sessionId),
       mcpError: session.mcpError || null,
+      generation: session.generation,
     };
   }
 
@@ -2381,7 +2386,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
       };
       activeSessions.set(sessionId, remoteSession);
       wireSessionPty(remoteSession, sessionId, attachResult.ptyProcess);
-      return { ok: true, reattached: false, remote: true, sandbox: false };
+      return { ok: true, reattached: false, remote: true, sandbox: false, generation: remoteSession.generation };
     }
   }
 
@@ -2690,6 +2695,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
     ok: true, reattached: false, sandbox: !!sessionOptions?.sandbox,
     mcpState: mcpError ? 'failed' : getMcpState(sessionId),
     mcpError,
+    generation: session.generation,
   };
 });
 
