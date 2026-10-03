@@ -710,13 +710,34 @@ function drainLiveBufferIntoHiddenAccumulator(sessionId) {
   acc.raw = buf.chunks.join('') + acc.raw; // leftover is older — goes first
 }
 
+// Cursor-position query (DSR 6): never kept for a replay — see
+// .ai/contexts/ipc-bridge.md, "Cursor-position queries".
+const CURSOR_POSITION_QUERY = '\x1b[6n';
+
+// One pass: a query re-formed by the removal is left alone, see the doc above.
+function removeCursorPositionQueries(str) {
+  return str.includes(CURSOR_POSITION_QUERY) ? str.split(CURSOR_POSITION_QUERY).join('') : str;
+}
+
+// Length of the query prefix `prev` ends with that `next` completes, 0 if
+// none. Only a chunk starting with '[', '6' or 'n' can complete one.
+function splitQueryPrefixLength(prev, next) {
+  if (!'[6n'.includes(next[0])) return 0;
+  for (let k = CURSOR_POSITION_QUERY.length - 1; k > 0; k--) {
+    if (prev.endsWith(CURSOR_POSITION_QUERY.slice(0, k)) && next.startsWith(CURSOR_POSITION_QUERY.slice(k))) return k;
+  }
+  return 0;
+}
+
 function appendToHiddenAccumulator(sessionId, data) {
   let acc = hiddenAccumulators.get(sessionId);
   if (!acc) {
     acc = { raw: '', reset: false };
     hiddenAccumulators.set(sessionId, acc);
   }
-  acc.raw += data;
+  const k = splitQueryPrefixLength(acc.raw, data);
+  const head = k ? acc.raw.slice(0, -k) : acc.raw;
+  acc.raw = head + removeCursorPositionQueries(k ? data.slice(CURSOR_POSITION_QUERY.length - k) : data);
   if (acc.raw.length > HIDDEN_BUFFER_MAX_LEN) {
     const trimmed = trimHiddenBuffer(acc.raw, HIDDEN_BUFFER_MAX_LEN);
     acc.raw = trimmed.data;
@@ -778,9 +799,11 @@ function replayHiddenBuffer(sessionId) {
   if (!acc || !acc.raw) return;
   const entry = openSessions.get(sessionId);
   if (!entry) return; // destroySession may have removed it first
+  const raw = removeCursorPositionQueries(acc.raw);
+  if (!raw && !acc.reset) return;
   if (acc.reset) entry.terminal.reset();
-  if (window.ATRACE) noteRenderWrite(sessionId, 1, acc.raw.length);
-  entry.terminal.write(acc.raw);
+  if (window.ATRACE) noteRenderWrite(sessionId, 1, raw.length);
+  entry.terminal.write(raw);
 }
 
 // Entry point for PTY data (wired to window.api.onTerminalData in app.js).
