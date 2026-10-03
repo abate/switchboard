@@ -76,7 +76,8 @@ const { scanMdFiles, acceptMdFile } = require('./scan-md-files');
 const { isSensitivePath, isSensitivePathAsync, isAllowedMemoryPath: _isAllowedMemoryPath, resolveAllowedMemoryPath: _resolveAllowedMemoryPath, isKnownProjectRoot: _isKnownProjectRoot } = require('./ipc-path-validator');
 const { validatePreLaunchCmd } = require('./pre-launch-cmd-guard');
 const { normalizePtySize } = require('./pty-size');
-const { setPtyOpLogger, resizePty, killPty, ptyExitSignalName } = require('./pty-ops');
+const { setPtyOpLogger, killPty, ptyExitSignalName } = require('./pty-ops');
+const { createTerminalResizeHandler } = require('./terminal-resize');
 const { createComposerState } = require('./composer-state');
 const { handleTerminalInput } = require('./terminal-input');
 const { createTriggerContext } = require('./trigger-context');
@@ -1720,9 +1721,10 @@ ipcMain.handle('remote-launch-session', async (_event, payload) => {
   if (!result.ok) return { ok: false, error: result.error };
   const session = registerRemoteAttachSession(result.descriptor.sessionId, {
     alias: payload.alias, projectPath: result.descriptor.cwd, cwd: result.descriptor.cwd, ptyProcess: result.attachResult.ptyProcess,
+    remoteResizeAllowed: result.attachResult.remoteResizeAllowed,
   });
   remoteIndexer.refreshHostNow(payload.alias, { force: true }).catch(() => {});
-  return { ok: true, remote: true, generation: session.generation };
+  return { ok: true, remote: true, remoteResizeAllowed: session.remoteResizeAllowed, generation: session.generation };
 });
 
 // --- IPC: remote-send-prompt ---
@@ -2349,12 +2351,13 @@ function wireSessionPty(session, sessionId, ptyProcess) {
 }
 
 // --- IPC: open-terminal ---
-function registerRemoteAttachSession(sessionId, { alias, projectPath, cwd, ptyProcess }) {
+function registerRemoteAttachSession(sessionId, { alias, projectPath, cwd, ptyProcess, remoteResizeAllowed }) {
   const remoteSession = {
     pty: ptyProcess,
     // handle: {write, isAlive} — see .ai/contexts/trigger-watcher.md, "Session handle"
     handle: ptyProcess,
     host: alias, kind: 'remote-attach',
+    remoteResizeAllowed: remoteResizeAllowed === true,
     rendererAttached: true, exited: false,
     outputBuffer: [], outputBufferSize: 0, altScreen: false,
     projectPath, firstResize: true,
@@ -2396,6 +2399,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
       ok: true, reattached: true, sandbox: !!session.sandbox,
       mcpState: session.mcpError ? 'failed' : getMcpState(session.realSessionId || sessionId),
       mcpError: session.mcpError || null,
+      remoteResizeAllowed: session.remoteResizeAllowed,
       generation: session.generation,
     };
   }
@@ -2419,8 +2423,9 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
       const remoteCwd = (descriptor && typeof descriptor.cwd === 'string') ? descriptor.cwd : null;
       const remoteSession = registerRemoteAttachSession(sessionId, {
         alias, projectPath, cwd: remoteCwd, ptyProcess: attachResult.ptyProcess,
+        remoteResizeAllowed: attachResult.remoteResizeAllowed,
       });
-      return { ok: true, reattached: false, remote: true, sandbox: false, generation: remoteSession.generation };
+      return { ok: true, reattached: false, remote: true, sandbox: false, remoteResizeAllowed: remoteSession.remoteResizeAllowed, generation: remoteSession.generation };
     }
   }
 
@@ -2886,26 +2891,18 @@ ipcMain.on('terminal-input', (_event, sessionId, data) => {
 });
 
 // --- IPC: terminal-resize (fire-and-forget) ---
-ipcMain.on('terminal-resize', (_event, sessionId, cols, rows) => {
+const handleTerminalResize = createTerminalResizeHandler(activeSessions);
+ipcMain.on('terminal-resize', (_event, sessionId, cols, rows, refresh) => {
   const session = activeSessions.get(sessionId);
   if (session && !session.exited) {
     // For plain terminals, suppress buffering during resize to avoid
     // accumulating prompt redraws that pollute reattach replay
     if (session.isPlainTerminal) session._suppressBuffer = true;
 
-    resizePty(session, cols, rows, sessionId);
+    handleTerminalResize(sessionId, cols, rows, refresh);
 
     if (session.isPlainTerminal) {
       setTimeout(() => { session._suppressBuffer = false; }, 200);
-    }
-
-    // First resize: nudge to force TUI redraw on reattach (skip for plain terminals — causes duplicate prompts)
-    if (session.firstResize && !session.isPlainTerminal) {
-      session.firstResize = false;
-      setTimeout(() => {
-        if (!resizePty(session, cols + 1, rows, sessionId)) return;
-        setTimeout(() => resizePty(session, cols, rows, sessionId), 50);
-      }, 50);
     }
   }
 });

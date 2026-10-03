@@ -921,6 +921,12 @@ from the descriptor the refresh cycle already pulls.
 
 ## Remote hosts — tmux attach (issue #221)
 
+Screen refresh (#446) uses a fitted-size nudge only for solo attachments.
+Shared attachments skip automatic return refresh and explicitly repaint the
+local buffer without resizing their ssh PTY. All geometry resizes retain
+the solo-client rule below; see
+[terminal-refresh](terminal-refresh.md) for restoration and measurement limits.
+
 `open-terminal` no longer refuses every remote session outright. When
 `isRemoteFolder(cachedFolder)` is true, it now looks up that session's own
 descriptor via `remoteIndexer.getRemoteSessions(alias)` and asks
