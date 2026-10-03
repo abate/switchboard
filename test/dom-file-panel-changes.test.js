@@ -53,6 +53,42 @@ function makeStatusResult(overrides = {}) {
 
 const DEFAULT_PAIR = { ok: true, original: 'old\n', current: 'new\n', version: 'v1', binary: false, truncated: false };
 
+test('Changes snapshots scroll before opening the diff and restores it without a status request', async () => {
+  const ctx = setupFilePanelDom();
+  try {
+    ctx.window.switchPanel('s1');
+    await ctx.window.openChangesTab('s1');
+    await flush();
+    const list = ctx.document.getElementById('changes-list');
+    const container = ctx.document.getElementById('file-panel-changes');
+    let scroll = 234;
+    let display = container.style.display;
+    Object.defineProperty(container.style, 'display', {
+      get: () => display,
+      set: value => { display = value; if (value === 'none') scroll = 0; },
+    });
+    Object.defineProperty(list, 'scrollTop', {
+      get: () => {
+        if (container.style.display === 'none' || list.classList.contains('changes-list-split')) scroll = 0;
+        return scroll;
+      },
+      set: value => { scroll = value; },
+    });
+    await ctx.window.openChangesDiff('s1', { path: 'src/a.js', staged: true });
+    await flush();
+    assert.equal(list.scrollTop, 0, 'the split layout loses its current scroll position');
+    ctx.window.switchPanel('s2');
+    await ctx.window.openChangesTab('s2');
+    await flush();
+    ctx.window.switchPanel('s1');
+    const before = ctx.calls.status.length;
+    ctx.document.getElementById('file-panel-back-btn').click();
+    assert.equal(list.scrollTop, 234);
+    assert.ok(list.querySelector('.selected'));
+    assert.equal(ctx.calls.status.length, before);
+  } finally { ctx.destroy(); }
+});
+
 // A stand-in for a CodeMirror view: it owns a DOM node, reports a document
 // the test can rewrite (typing), and records its own destruction — enough for
 // the reuse, dirty-buffer and save paths, none of the bundle.
@@ -223,6 +259,33 @@ function clickRow(ctx, filePath) {
 function closeEditorBtn(ctx) {
   return ctx.document.getElementById('changes-diff-close-btn');
 }
+
+test('shared back and Escape restore the Changes list DOM, scroll and selection without git calls', async () => {
+  const ctx = setupFilePanelDom();
+  try {
+    ctx.window.switchPanel('s1');
+    await ctx.window.openChangesTab('s1');
+    const list = ctx.document.getElementById('changes-list');
+    const first = list.firstChild;
+    list.scrollTop = 94;
+    clickRow(ctx, 'src/a.js');
+    await flush();
+    const counts = [ctx.calls.status.length, ctx.calls.file.length, ctx.calls.diff.length];
+    const back = ctx.document.getElementById('file-panel-back-btn');
+    assert.ok(back);
+    back.click();
+    assert.equal(list.firstChild, first);
+    assert.equal(list.scrollTop, 94);
+    assert.ok(first.classList.contains('selected'));
+    assert.equal(ctx.document.getElementById('changes-diff-view').style.display, 'none');
+    assert.deepEqual([ctx.calls.status.length, ctx.calls.file.length, ctx.calls.diff.length], counts);
+    clickRow(ctx, 'src/a.js');
+    await flush();
+    ctx.document.getElementById('changes-diff-view').dispatchEvent(new ctx.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    assert.equal(ctx.document.getElementById('changes-diff-view').style.display, 'none');
+    assert.equal(list.firstChild, first);
+  } finally { ctx.destroy(); }
+});
 
 async function openFile(ctx, sessionId, filePath) {
   ctx.window.switchPanel(sessionId);

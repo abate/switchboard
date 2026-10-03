@@ -48,7 +48,7 @@ function result(over = {}) {
   };
 }
 
-function setupDom({ touchedImpl, readImpl } = {}) {
+function setupDom({ touchedImpl, readImpl, viewerDirty = false, confirmImpl } = {}) {
   const dom = new JSDOM(INDEX_HTML, { url: 'http://localhost/', runScripts: 'outside-only', pretendToBeVisual: true });
   const { window } = dom;
   const calls = { touched: [], readFile: [], viewerOpen: [] };
@@ -59,24 +59,25 @@ function setupDom({ touchedImpl, readImpl } = {}) {
     onMcpCloseAllDiffs: () => {},
     onMcpCloseTab: () => {},
     mcpDiffResponse: () => {},
-    sessionTouchedFiles: (sessionId) => {
+    sessionTouchedFiles: (sessionId, options) => {
       calls.touched.push(sessionId);
-      return Promise.resolve((touchedImpl || (() => result()))(sessionId));
+      return Promise.resolve((touchedImpl || (() => result()))(sessionId, options));
     },
     readFileForPanel: (filePath) => {
       calls.readFile.push(filePath);
       return Promise.resolve((readImpl || (() => ({ ok: true, content: 'file body' })))(filePath));
     },
   };
-  window.confirm = () => true;
+  window.confirm = confirmImpl || (() => true);
   window.loadCodeMirrorBundle = () => Promise.resolve();
   Object.defineProperty(window, 'ViewerPanel', {
     value: function ViewerPanelStub() {
       return {
         open(label, filePath, content) { calls.viewerOpen.push({ label, filePath, content }); },
         destroy() {},
-        hasUnsavedEdits: () => false,
-        snapshot: () => null,
+        hasUnsavedEdits: () => viewerDirty,
+        snapshot: () => viewerDirty ? { filePath: '/work/a.txt', content: 'edited', agreedBase: 'file body' } : null,
+        snapshotHasUnsavedEdits: () => viewerDirty,
       };
     },
     writable: true,
@@ -95,6 +96,7 @@ function setupDom({ touchedImpl, readImpl } = {}) {
     document: window.document,
     calls,
     stateOf: (sessionId) => vm.runInContext('filePanelState', ctx).get(sessionId),
+    evalSource: source => vm.runInContext(source, ctx),
     destroy: () => window.close(),
   };
 }
@@ -137,7 +139,7 @@ test('the header carries a Touched toggle that opens the tab for the session and
     await openTab(ctx);
     assert.deepEqual(ctx.calls.touched, ['s1']);
     assert.equal(btn.getAttribute('aria-pressed'), 'true');
-    assert.equal(ctx.stateOf('s1').currentTab.type, 'touched');
+    assert.equal(ctx.stateOf('s1').currentTab?.type, 'touched');
     assert.equal(rows(ctx).length, 2);
     const first = rows(ctx)[0];
     assert.match(first.textContent, /\/work\/a\.txt/);
@@ -203,6 +205,268 @@ test('a present file opens through readFileForPanel and the file viewer', async 
   } finally { ctx.destroy(); }
 });
 
+test('back and Escape restore the same Touched rows, scroll and selection without another request', async () => {
+  const ctx = setupDom();
+  try {
+    await openTab(ctx);
+    const list = ctx.document.getElementById('touched-list');
+    const first = rows(ctx)[0];
+    list.scrollTop = 123;
+    clickRow(ctx, '/work/a.txt');
+    await flush();
+    const back = ctx.document.getElementById('file-panel-back-btn');
+    assert.ok(back, 'a shared panel back button');
+    back.click();
+    assert.equal(ctx.stateOf('s1').currentTab?.type, 'touched');
+    assert.equal(rows(ctx)[0], first);
+    assert.equal(list.scrollTop, 123);
+    assert.ok(first.classList.contains('selected'));
+    assert.equal(ctx.calls.touched.length, 1);
+    clickRow(ctx, '/work/a.txt');
+    await flush();
+    ctx.document.getElementById('file-panel-viewer').dispatchEvent(new ctx.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    assert.equal(ctx.stateOf('s1').currentTab?.type, 'touched');
+    assert.equal(rows(ctx)[0], first);
+    assert.equal(ctx.calls.touched.length, 1);
+  } finally { ctx.destroy(); }
+});
+
+test('time formatting uses the injected clock and switches at the named threshold', () => {
+  const ctx = setupDom();
+  try {
+    const now = Date.parse('2026-10-03T12:00:00Z');
+    assert.equal(ctx.window.formatTouchedTime(now - 12 * 60000, now), '12 min ago');
+    assert.equal(ctx.window.formatTouchedTime(now - 86400000 + 1, now), '23 hr ago');
+    assert.equal(ctx.window.formatTouchedTime(now - 86400000, now), new ctx.window.Date(now - 86400000).toLocaleString());
+  } finally { ctx.destroy(); }
+});
+
+for (const targetClass of ['cm-panels', 'cm-search', 'cm-tooltip', 'input', 'textarea']) {
+  test(`Escape in ${targetClass} stays in the viewer`, async () => {
+    const ctx = setupDom();
+    try {
+      await openTab(ctx);
+      clickRow(ctx, '/work/a.txt');
+      await flush();
+      const target = ctx.document.createElement(['input', 'textarea'].includes(targetClass) ? targetClass : 'div');
+      target.className = targetClass;
+      ctx.document.getElementById('file-panel-viewer').appendChild(target);
+      target.dispatchEvent(new ctx.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      assert.equal(ctx.stateOf('s1').currentTab.type, 'file');
+    } finally { ctx.destroy(); }
+  });
+}
+
+test('Escape closes the search panel before the panel can go back', async () => {
+  const ctx = setupDom();
+  try {
+    await openTab(ctx);
+    clickRow(ctx, '/work/a.txt');
+    await flush();
+    const source = fs.readFileSync(path.join(PUBLIC_DIR, 'codemirror-setup.js'), 'utf8');
+    const built = require('esbuild').buildSync({
+      stdin: { contents: source + '\nwindow.testCreateSearchBar = createCMSearchBar;', resolveDir: PUBLIC_DIR, loader: 'js' },
+      bundle: true, write: false, format: 'iife', platform: 'browser', logLevel: 'silent',
+    });
+    ctx.evalSource(built.outputFiles[0].text);
+    const viewer = ctx.document.getElementById('file-panel-viewer');
+    const search = ctx.window.testCreateSearchBar(viewer, {
+      focus() {}, dispatch() {},
+      state: { doc: { toString: () => 'hello' }, sliceDoc: () => '', selection: { main: { from: 0, to: 0 } } },
+    });
+    search.open();
+    assert.notEqual(search.bar.style.display, 'none');
+    search.bar.querySelector('input').dispatchEvent(new ctx.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    assert.equal(search.bar.style.display, 'none');
+    assert.equal(ctx.stateOf('s1').currentTab.type, 'file');
+  } finally { ctx.destroy(); }
+});
+
+for (const mode of ['consumed', 'composing', 'content']) {
+  test(`Escape in editor content is ${mode}`, async () => {
+    const ctx = setupDom();
+    try {
+      await openTab(ctx);
+      clickRow(ctx, '/work/a.txt');
+      await flush();
+      const editor = ctx.document.createElement('textarea');
+      editor.className = 'cm-content';
+      ctx.document.getElementById('file-panel-viewer').appendChild(editor);
+      if (mode === 'consumed') editor.addEventListener('keydown', event => event.preventDefault());
+      editor.dispatchEvent(new ctx.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, isComposing: mode === 'composing' }));
+      assert.equal(ctx.stateOf('s1').currentTab.type, mode === 'content' ? 'touched' : 'file');
+    } finally { ctx.destroy(); }
+  });
+}
+
+test('Touched snapshots scroll before hiding even when hidden layout reports zero', async () => {
+  const ctx = setupDom();
+  try {
+    await openTab(ctx);
+    const list = ctx.document.getElementById('touched-list');
+    const container = ctx.document.getElementById('file-panel-touched');
+    let scroll = 123;
+    let display = container.style.display;
+    Object.defineProperty(container.style, 'display', {
+      get: () => display,
+      set: value => { display = value; if (value === 'none') scroll = 0; },
+    });
+    Object.defineProperty(list, 'scrollTop', {
+      get: () => container.style.display === 'none' ? 0 : scroll,
+      set: value => { scroll = value; },
+    });
+    clickRow(ctx, '/work/a.txt');
+    await flush();
+    await openTab(ctx, 's2');
+    ctx.window.switchPanel('s1');
+    ctx.document.getElementById('file-panel-back-btn').click();
+    assert.equal(list.scrollTop, 123);
+    assert.ok(rows(ctx)[0].classList.contains('selected'));
+    assert.equal(ctx.calls.touched.length, 2);
+  } finally { ctx.destroy(); }
+});
+
+for (const destination of ['file', 'session']) {
+  test(`a pending Touched refresh is saved while another ${destination} is visible and Back makes no IPC`, async () => {
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    let requests = 0;
+    const ctx = setupDom({ touchedImpl: () => ++requests === 1 ? result() : gate });
+    try {
+      await openTab(ctx);
+      const tab = ctx.stateOf('s1').currentTab;
+      ctx.document.getElementById('touched-refresh-btn').click();
+      clickRow(ctx, '/work/a.txt');
+      await flush();
+      if (destination === 'session') await openTab(ctx, 's2');
+      release(result({ files: [row({ path: '/work/new.txt' })] }));
+      await flush();
+      assert.equal(tab.data.files[0].path, '/work/new.txt');
+      assert.equal(ctx.stateOf('s1').currentTab.type, 'file');
+      ctx.window.switchPanel('s1');
+      const before = ctx.calls.touched.length;
+      ctx.document.getElementById('file-panel-back-btn').click();
+      assert.deepEqual(rows(ctx).map(r => r.dataset.path), ['/work/new.txt']);
+      assert.equal(ctx.calls.touched.length, before);
+    } finally { release(result()); ctx.destroy(); }
+  });
+}
+
+test('one extension jumps to a sixty-day mtime and removes the older button', async () => {
+  const now = Date.now();
+  const ctx = setupDom({ touchedImpl: (_id, options) => options.windowDays < 60
+    ? result({ files: [], hasOlder: true, loadedWindowStart: now - 86400000, windowStart: now - 86400000, nextOlderTimestamp: now - 60 * 86400000 })
+    : result({ files: [row({ lastTouched: now - 60 * 86400000 })], hasOlder: false }) });
+  try {
+    await openTab(ctx);
+    ctx.document.getElementById('touched-more-btn').click();
+    await flush();
+    assert.equal(rows(ctx).length, 1);
+    assert.equal(ctx.document.getElementById('touched-more-btn'), null);
+    assert.equal(ctx.calls.touched.length, 2);
+  } finally { ctx.destroy(); }
+});
+
+test('a pending Touched refresh renders on a session switch back without another IPC', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const ctx = setupDom({ touchedImpl: () => gate });
+  try {
+    ctx.window.switchPanel('s1');
+    ctx.document.getElementById('touched-toggle-btn').click();
+    ctx.window.switchPanel('s2');
+    release(result({ files: [row({ path: '/work/late.txt' })] }));
+    await flush();
+    ctx.window.switchPanel('s1');
+    assert.deepEqual(rows(ctx).map(r => r.dataset.path), ['/work/late.txt']);
+    assert.equal(ctx.calls.touched.length, 1);
+  } finally { release(result()); ctx.destroy(); }
+});
+
+test('one extension jumps to fractional-day activity by rounding up to a whole day', async () => {
+  const now = Date.now();
+  const day = 86400000;
+  const ctx = setupDom({ touchedImpl: (_id, options) => options.windowDays < 60.25
+    ? result({ files: [], hasOlder: true, loadedWindowStart: now - day, windowStart: now - day, nextOlderTimestamp: now - 60.25 * day })
+    : result({ files: [row({ lastTouched: now - 60.25 * day })], hasOlder: false }) });
+  try {
+    await openTab(ctx);
+    ctx.document.getElementById('touched-more-btn').click();
+    await flush();
+    assert.equal(ctx.stateOf('s1').currentTab.windowDays, 61);
+    assert.equal(rows(ctx).length, 1);
+    assert.equal(ctx.document.getElementById('touched-more-btn'), null);
+    assert.equal(ctx.calls.touched.length, 2);
+  } finally { ctx.destroy(); }
+});
+
+test('a Touched return target survives another session using the shared list', async () => {
+  const ctx = setupDom();
+  try {
+    await openTab(ctx, 's1');
+    const first = rows(ctx)[0];
+    ctx.document.getElementById('touched-list').scrollTop = 123;
+    clickRow(ctx, '/work/a.txt');
+    await flush();
+    await openTab(ctx, 's2');
+    ctx.window.switchPanel('s1');
+    ctx.document.getElementById('file-panel-back-btn').click();
+    assert.equal(rows(ctx)[0], first);
+    assert.equal(ctx.document.getElementById('touched-list').scrollTop, 123);
+    assert.equal(ctx.calls.touched.length, 2);
+  } finally { ctx.destroy(); }
+});
+
+test('Back keeps a dirty file on refusal and discards it without holding it after confirmation', async () => {
+  let agree = false;
+  const ctx = setupDom({ viewerDirty: true, confirmImpl: () => agree });
+  try {
+    await openTab(ctx);
+    clickRow(ctx, '/work/a.txt');
+    await flush();
+    const back = ctx.document.getElementById('file-panel-back-btn');
+    back.click();
+    assert.equal(ctx.stateOf('s1').currentTab?.type, 'file');
+    agree = true;
+    back.click();
+    assert.equal(ctx.stateOf('s1').currentTab?.type, 'touched');
+    assert.equal(ctx.stateOf('s1').heldFileTabs?.size || 0, 0);
+  } finally { ctx.destroy(); }
+});
+
+test('cached time windows extend twice locally, count hidden files, retain window on back and sort by path', async () => {
+  const now = Date.now();
+  const ctx = setupDom({ touchedImpl: () => result({ windowStart: now - 86400000, loadedWindowStart: now - 21 * 86400000, hasOlder: false, files: [
+    row({ path: '/z', lastTouched: now, diskMtime: now - 1000 }),
+    row({ path: '/a', lastTouched: now - 5 * 86400000 }),
+    row({ path: '/b', lastTouched: now - 15 * 86400000 }),
+  ] }) });
+  try {
+    await openTab(ctx);
+    assert.deepEqual(rows(ctx).map(r => r.dataset.path), ['/z']);
+    assert.match(ctx.document.getElementById('touched-summary').textContent, /2 older files/);
+    assert.match(rows(ctx)[0].title, /Modified:/);
+    ctx.document.getElementById('touched-more-btn').click();
+    await flush();
+    assert.deepEqual(rows(ctx).map(r => r.dataset.path), ['/z', '/a']);
+    ctx.document.getElementById('touched-more-btn').click();
+    await flush();
+    assert.equal(rows(ctx).length, 3);
+    assert.equal(ctx.document.getElementById('touched-more-btn'), null);
+    assert.equal(ctx.calls.touched.length, 1);
+    const sort = ctx.document.getElementById('touched-sort');
+    sort.value = 'path';
+    sort.dispatchEvent(new ctx.window.Event('change'));
+    assert.deepEqual(rows(ctx).map(r => r.dataset.path), ['/a', '/b', '/z']);
+    clickRow(ctx, '/z');
+    await flush();
+    ctx.document.getElementById('file-panel-back-btn').click();
+    assert.equal(rows(ctx).length, 3);
+    assert.equal(ctx.stateOf('s1').currentTab.windowDays, 21);
+    assert.equal(ctx.calls.touched.length, 1);
+  } finally { ctx.destroy(); }
+});
+
 test('a gone, refused, unreadable or non-file row says so and a click reads nothing', async () => {
   const ctx = setupDom({
     touchedImpl: () => result({
@@ -223,14 +487,14 @@ test('a gone, refused, unreadable or non-file row says so and a click reads noth
       '/work/locked.txt': 'unreadable',
       '/work/dir': 'not a file',
     });
-    assert.match(rows(ctx)[0].title, /no longer exists/i);
+    assert.match(rows(ctx).find(r => r.dataset.path === '/work/gone.txt').title, /no longer exists/i);
     for (const r of rows(ctx)) {
       assert.equal(r.classList.contains('touched-openable'), false);
       r.dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
     }
     await flush();
     assert.deepEqual(ctx.calls.readFile, []);
-    assert.equal(ctx.stateOf('s1').currentTab.type, 'touched');
+    assert.equal(ctx.stateOf('s1').currentTab?.type, 'touched');
   } finally { ctx.destroy(); }
 });
 
@@ -311,7 +575,7 @@ test('a refused read stays on the tab and shows the reason', async () => {
     await openTab(ctx);
     clickRow(ctx, '/work/a.txt');
     await flush();
-    assert.equal(ctx.stateOf('s1').currentTab.type, 'touched');
+    assert.equal(ctx.stateOf('s1').currentTab?.type, 'touched');
     assert.match(ctx.document.getElementById('touched-summary').textContent, /access to sensitive path denied/);
     assert.deepEqual(ctx.calls.viewerOpen, []);
   } finally { ctx.destroy(); }
