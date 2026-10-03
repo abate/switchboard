@@ -37,6 +37,7 @@ const path = require('path');
 const os   = require('os');
 
 const { createLocalSessionHandle } = require('./trigger-context');
+const { promptMatches } = require('./transcript-turn');
 
 const DEFAULT_TRIGGERS_DIR   = path.join(os.homedir(), '.switchboard', 'triggers');
 // Default idle-wait timeout: 5 minutes.
@@ -94,6 +95,10 @@ const REASON_DIALOG_OPEN_AFTER_WRITE = 'the CLI reports a dialog open (waiting) 
 const REASON_DEADLINE_BEFORE_WRITE = 'the step deadline passed before it could be written; nothing was written';
 const REASON_CLI_BUSY     = 'the CLI still reported a turn running (busy) at the deadline; nothing was written';
 const REASON_CLI_NOT_IDLE = 'the CLI never reported idle before the deadline; nothing was written';
+const REASON_UNCONFIRMED_BEFORE_DEADLINE = 'the step was written while the CLI reported busy; neither the CLI nor the transcript (the step\'s own entry, then a closed turn) confirmed it before the step deadline; nothing more was typed';
+function reasonNoOwnEntry(ms) {
+  return `the step was written while the CLI reported busy; the CLI did not react and the transcript did not show the step within ${Math.round(ms / 1000)} s of its Enter; nothing more was typed`;
+}
 const REASON_IDLE_UNSETTLED = 'the CLI was idle only briefly before the deadline; it never held long enough to settle; nothing was written';
 
 const ACCEPTED_WAITS = ['idle', 'none'];
@@ -304,6 +309,85 @@ function getBusyFallSettleMs() {
   return v !== undefined ? v : DEFAULT_BUSY_FALL_SETTLE_MS;
 }
 
+// see .ai/contexts/trigger-watcher.md, "Transcript fallback while the descriptor stays busy"
+const DEFAULT_TRANSCRIPT_QUIET_MS = 3000; // ms
+function getTranscriptQuietMs() {
+  const v = envNumber('SWITCHBOARD_TRANSCRIPT_QUIET_MS');
+  return v !== undefined ? v : DEFAULT_TRANSCRIPT_QUIET_MS;
+}
+
+const TRANSCRIPT_FALLBACK_STATUSES = ['busy', 'shell'];
+
+// see .ai/contexts/trigger-watcher.md, "A chain step written while the CLI stays busy"
+const DEFAULT_PENDING_OWN_ENTRY_MS = 30000; // ms
+function getPendingOwnEntryMs() {
+  const v = envNumber('SWITCHBOARD_PENDING_OWN_ENTRY_MS');
+  return v !== undefined ? v : DEFAULT_PENDING_OWN_ENTRY_MS;
+}
+
+function readTranscriptTurn(ctx, sessionId) {
+  if (typeof ctx.getTranscriptTurn !== 'function') return null;
+  try {
+    return ctx.getTranscriptTurn(sessionId) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// see .ai/contexts/trigger-watcher.md, "Transcript fallback while the descriptor stays busy"
+function transcriptShowsTurnOver(ctx, sessionId, desc, afterMs, now, dialogSeen) {
+  if (!desc || !TRANSCRIPT_FALLBACK_STATUSES.includes(desc.status) || dialogSeen) return false;
+  const turn = readTranscriptTurn(ctx, sessionId);
+  if (!turn || turn.closed !== true || !Number.isFinite(turn.closedAt) || !Number.isFinite(turn.mtimeMs)) return false;
+  if (!(turn.closedAt >= afterMs)) return false;
+  return now - turn.mtimeMs >= getTranscriptQuietMs();
+}
+
+function transcriptOwnEntryAt(ctx, sessionId, sinceMs, command) {
+  const turn = readTranscriptTurn(ctx, sessionId);
+  if (!turn || !Array.isArray(turn.prompts)) return null;
+  const own = turn.prompts.find((p) => Number.isFinite(p.at) && p.at >= sinceMs && promptMatches(p.text, command));
+  return own ? own.at : null;
+}
+
+function cliReadsBusyOrShell(ctx, sessionId) {
+  const desc = readCliStatusRaw(ctx, sessionId);
+  return !!desc && TRANSCRIPT_FALLBACK_STATUSES.includes(desc.status);
+}
+
+function transcriptReactedSince(ctx, sessionId, sinceMs, command) {
+  if (!cliReadsBusyOrShell(ctx, sessionId)) return false;
+  return transcriptOwnEntryAt(ctx, sessionId, sinceMs, command) !== null;
+}
+
+// see .ai/contexts/trigger-watcher.md, "A chain step written while the CLI stays busy"
+function waitForPendingConfirmation(sessionId, ctx, enterAtMs, command, deadlineMs) {
+  const start = Date.now();
+  const ownEntryDeadline = isCompactCommand(command) ? deadlineMs : Math.min(deadlineMs, enterAtMs + getPendingOwnEntryMs());
+  return pollLoop((resolve, scheduleNext) => {
+    const now = Date.now();
+    const waited_ms = now - start;
+    if (!ctx.getPtyForSession(sessionId)) {
+      return resolve({ confirmed: false, sessionExited: true, timedOut: false, waited_ms });
+    }
+    if (cliReactedSince(ctx, sessionId, enterAtMs)) {
+      return resolve({ confirmed: true, source: 'descriptor', sessionExited: false, timedOut: false, waited_ms });
+    }
+    const ownAt = transcriptOwnEntryAt(ctx, sessionId, enterAtMs, command);
+    if (ownAt !== null
+      && transcriptShowsTurnOver(ctx, sessionId, readCliStatusRaw(ctx, sessionId), ownAt, now, false)) {
+      return resolve({ confirmed: true, source: 'transcript', sessionExited: false, timedOut: false, waited_ms });
+    }
+    if (ownAt === null && now >= ownEntryDeadline && ownEntryDeadline < deadlineMs) {
+      return resolve({ confirmed: false, sessionExited: false, timedOut: true, noOwnEntry: true, waited_ms });
+    }
+    if (now >= deadlineMs) {
+      return resolve({ confirmed: false, sessionExited: false, timedOut: true, waited_ms });
+    }
+    scheduleNext();
+  });
+}
+
 // see .ai/contexts/trigger-watcher.md, "waitForBusyFall waits for the rise too"
 function getBusyRiseWaitMs() {
   const v = envNumber('SWITCHBOARD_BUSY_RISE_WAIT_MS');
@@ -414,7 +498,7 @@ function cliForbidsRecoveryEnter(ctx, sessionId) {
 }
 
 // see .ai/contexts/trigger-watcher.md, "Readiness before every step" (return shape, descriptor loss, deadline)
-function waitForCliIdleAfter(sessionId, ctx, afterMs, deadlineMs, settleMs = 0, trustIdleStamp = false) {
+function waitForCliIdleAfter(sessionId, ctx, afterMs, deadlineMs, settleMs = 0, trustIdleStamp = false, transcript = null) {
   const start = Date.now();
   let idleSince = null;
   let idleStamp = null;
@@ -434,6 +518,7 @@ function waitForCliIdleAfter(sessionId, ctx, afterMs, deadlineMs, settleMs = 0, 
       return resolve({ ready: false, available: false, timedOut: false, sessionExited: false, waited_ms, lastStatus, waitingSeen });
     }
     let idleHeld = false;
+    let source = 'descriptor';
     if (!s) {
       idleSince = null;
     } else {
@@ -448,10 +533,14 @@ function waitForCliIdleAfter(sessionId, ctx, afterMs, deadlineMs, settleMs = 0, 
         idleHeld = now - idleSince >= settleMs;
       } else {
         idleSince = null;
+        if (transcript && transcriptShowsTurnOver(ctx, sessionId, s, transcript.transcriptAfterMs, now, dialog.seen(now))) {
+          idleHeld = true;
+          source = 'transcript';
+        }
       }
     }
     if (idleHeld && now < deadlineMs) {
-      return resolve({ ready: true, available: true, timedOut: false, sessionExited: false, waited_ms, lastStatus, waitingSeen });
+      return resolve({ ready: true, available: true, timedOut: false, sessionExited: false, waited_ms, lastStatus, waitingSeen, source });
     }
     if (now >= deadlineMs) {
       return resolve({ ready: false, available: true, timedOut: true, sessionExited: false, waited_ms, lastStatus, waitingSeen: dialog.seen(now) });
@@ -494,7 +583,7 @@ function waitForCliIdleAfter(sessionId, ctx, afterMs, deadlineMs, settleMs = 0, 
  * the caller keeps the legacy instant-reply semantics — submit_retries traces
  * that the verification could not confirm a turn started.
  */
-async function submitWithVerify(handle, sessionId, command, ctx, deadlineMs) {
+async function submitWithVerify(handle, sessionId, command, ctx, deadlineMs, { transcriptReaction = false } = {}) {
   // Sampled before the write — see .ai/contexts/trigger-watcher.md ("submitted").
   const preBusy = ctx.isSessionBusy(sessionId);
 
@@ -513,7 +602,14 @@ async function submitWithVerify(handle, sessionId, command, ctx, deadlineMs) {
   // must fire on window expiry, so the deadline must NOT coincide with it.
   const effectiveDeadline = (deadlineMs !== undefined) ? deadlineMs : Infinity;
 
-  const probe = edgeMode ? () => cliReactedSince(ctx, sessionId, enterAt) : undefined;
+  let confirmSource = null;
+  const probe = edgeMode
+    ? () => {
+      if (cliReactedSince(ctx, sessionId, enterAt)) { confirmSource = 'descriptor'; return true; }
+      if (transcriptReaction && transcriptReactedSince(ctx, sessionId, enterAt, command)) { confirmSource = 'transcript'; return true; }
+      return false;
+    }
+    : undefined;
   const first = await pollForBusyObserved(sessionId, ctx, windowMs, effectiveDeadline, probe);
   if (first.sawBusy || first.sessionExited || first.timedOut) {
     return {
@@ -527,6 +623,7 @@ async function submitWithVerify(handle, sessionId, command, ctx, deadlineMs) {
       sessionExited: first.sessionExited,
       timedOut: first.timedOut,
       waited_ms: first.waited_ms,
+      confirmSource: first.sawBusy ? confirmSource : null,
     };
   }
 
@@ -590,6 +687,7 @@ async function submitWithVerify(handle, sessionId, command, ctx, deadlineMs) {
     sessionExited: second.sessionExited,
     timedOut: second.timedOut,
     waited_ms: first.waited_ms + second.waited_ms,
+    confirmSource: second.sawBusy ? confirmSource : null,
   };
 }
 
@@ -643,10 +741,13 @@ function waitForBusyFall(sessionId, ctx, deadlineMs, enterAtMs) {
         descIdleStamp = desc.statusUpdatedAt;
       }
       if (now - descIdleSince >= settleMs) {
-        return resolve({ timedOut: false, sessionExited: false, waited_ms: now - start });
+        return resolve({ timedOut: false, sessionExited: false, waited_ms: now - start, source: 'descriptor' });
       }
     } else {
       descIdleSince = null;
+      if (desc && transcriptShowsTurnOver(ctx, sessionId, desc, enterAtMs, now, dialog.seen(now))) {
+        return resolve({ timedOut: false, sessionExited: false, waited_ms: now - start, source: 'transcript' });
+      }
     }
     if (ctx.isSessionBusy(sessionId)) {
       hasRisen = true;
@@ -654,11 +755,11 @@ function waitForBusyFall(sessionId, ctx, deadlineMs, enterAtMs) {
     } else if (hasRisen) {
       if (idleSince === null) idleSince = now;
       if (now - idleSince >= settleMs) {
-        return resolve({ timedOut: false, sessionExited: false, waited_ms: now - start });
+        return resolve({ timedOut: false, sessionExited: false, waited_ms: now - start, source: 'busy_flag' });
       }
     } else if (now >= riseDeadline) {
       // Never rose within the bound: turn never observed, not an error.
-      return resolve({ timedOut: false, sessionExited: false, waited_ms: now - start });
+      return resolve({ timedOut: false, sessionExited: false, waited_ms: now - start, source: 'no_rise' });
     }
     scheduleNext();
   });
@@ -819,6 +920,7 @@ async function processTriggerFile(name, ctx, triggersDir, processedDir, onEntryR
   }
 
   let releaseSessionLock;
+  let forgetTranscript = null;
   let stepsTotal = 0;
 
   try {
@@ -1243,6 +1345,7 @@ async function processTriggerFile(name, ctx, triggersDir, processedDir, onEntryR
   }
 
   // ── 6. Chain path ─────────────────────────────────────────────────────────
+  if (typeof ctx.forgetTranscriptTurn === 'function') forgetTranscript = () => ctx.forgetTranscriptTurn(sessionId);
   // Global deadline for the whole chain
   const globalTimeout = (resolvedTimeoutMs !== undefined) ? resolvedTimeoutMs : getIdleTimeout();
   const globalDeadline = Date.now() + globalTimeout;
@@ -1290,6 +1393,7 @@ async function processTriggerFile(name, ctx, triggersDir, processedDir, onEntryR
   }
 
   let compactSentAtMs = null;
+  let previousEnterAtMs = -Infinity;
   const unconfirmedSteps = [];
 
   for (let i = 0; i < chain.length; i++) {
@@ -1364,9 +1468,12 @@ async function processTriggerFile(name, ctx, triggersDir, processedDir, onEntryR
     }
 
     let readyWaitedMs = 0;
+    let readySource = null;
     {
-      const ready = await waitForCliIdleAfter(sessionId, ctx, readyAfterMs === null ? -Infinity : readyAfterMs, stepDeadline, getBusyFallSettleMs());
+      const ready = await waitForCliIdleAfter(sessionId, ctx, readyAfterMs === null ? -Infinity : readyAfterMs, stepDeadline,
+        getBusyFallSettleMs(), false, { transcriptAfterMs: previousEnterAtMs });
       readyWaitedMs = ready.waited_ms;
+      if (ready.ready) readySource = ready.source;
       totalWaitedMs += readyWaitedMs;
       if (ready.sessionExited) {
         ctx.log.warn(`[trigger-watcher] Session exited waiting for the CLI to be ready at chain step ${i}:`, sessionId);
@@ -1425,7 +1532,7 @@ async function processTriggerFile(name, ctx, triggersDir, processedDir, onEntryR
     let stepWaitedMs = polite.waited_ms + readyWaitedMs;
     let verify;
     try {
-      verify = await submitWithVerify(entryHandle, sessionId, step.command, ctx, stepDeadline);
+      verify = await submitWithVerify(entryHandle, sessionId, step.command, ctx, stepDeadline, { transcriptReaction: true });
     } catch (err) {
       ctx.log.error(`[trigger-watcher] PTY write failed at chain step ${i}:`, err.message);
       await writeResult({ ok: false, error: 'pty write failed: ' + err.message, partial: true, steps_completed: i, sessionId, sent_at: step0SentAt, steps, total_waited_ms: totalWaitedMs });
@@ -1439,9 +1546,27 @@ async function processTriggerFile(name, ctx, triggersDir, processedDir, onEntryR
     if (isCompactCommand(step.command)) {
       compactSentAtMs = Number.isFinite(verify.enterAt) ? verify.enterAt : Date.parse(stepSentAt);
     }
+    previousEnterAtMs = Number.isFinite(verify.enterAt) ? verify.enterAt : Date.parse(stepSentAt);
+    const sources = readySource ? { ready_source: readySource } : {};
     submitRetries = verify.submit_retries;
     stepWaitedMs += verify.waited_ms;
     totalWaitedMs += verify.waited_ms;
+
+    if (verify.confirmed === false && verify.recoverySkipped && !verify.timedOut && !verify.sessionExited
+      && cliReadsBusyOrShell(ctx, sessionId) && readTranscriptTurn(ctx, sessionId) !== null) {
+      ctx.log.info(`[trigger-watcher] Chain step ${i} written while the CLI reads busy, waiting for its confirmation:`, sessionId);
+      const pending = await waitForPendingConfirmation(sessionId, ctx, verify.enterAt, step.command, stepDeadline);
+      stepWaitedMs += pending.waited_ms;
+      totalWaitedMs += pending.waited_ms;
+      if (pending.confirmed) {
+        verify = { ...verify, confirmed: true, composerConfirmed: true, sawBusy: true, recoverySkipped: false, confirmSource: pending.source };
+      } else if (pending.sessionExited) {
+        verify = { ...verify, sessionExited: true };
+      } else {
+        verify = { ...verify, pendingTimedOut: true, pendingNoOwnEntry: !!pending.noOwnEntry };
+      }
+    }
+    if (verify.confirmSource) sources.confirm_source = verify.confirmSource;
     // This step's own submitted -- same classification the chain fold below
     // uses, attached to the step itself so a consumer can ask "was THIS step
     // (e.g. the last one) confirmed?" instead of only the chain's weakest.
@@ -1465,24 +1590,28 @@ async function processTriggerFile(name, ctx, triggersDir, processedDir, onEntryR
     // Session exited / global timeout observed during verify.
     if (verify.sessionExited) {
       ctx.log.warn(`[trigger-watcher] Session exited during chain step ${i} submit verify:`, sessionId);
-      steps.push({ idx: i, command: step.command, sent_at: stepSentAt, waited_ms: stepWaitedMs, submit_retries: submitRetries, submitted: stepSubmitted, ...(stepConfirmed === null ? {} : { submit_confirmed: stepConfirmed }) });
+      steps.push({ idx: i, command: step.command, sent_at: stepSentAt, waited_ms: stepWaitedMs, submit_retries: submitRetries, submitted: stepSubmitted, ...(stepConfirmed === null ? {} : { submit_confirmed: stepConfirmed }), ...sources });
       await writeResult({ ok: false, submitted: chainSubmitted, error: 'session exited during wait', partial: true, steps_completed: i, sessionId, sent_at: step0SentAt, steps, total_waited_ms: totalWaitedMs });
       return;
     }
     if (verify.timedOut) {
       ctx.log.warn(`[trigger-watcher] Chain timeout during step ${i} submit verify:`, sessionId);
-      steps.push({ idx: i, command: step.command, sent_at: stepSentAt, waited_ms: stepWaitedMs, submit_retries: submitRetries, submitted: stepSubmitted, ...(stepConfirmed === null ? {} : { submit_confirmed: stepConfirmed }) });
+      steps.push({ idx: i, command: step.command, sent_at: stepSentAt, waited_ms: stepWaitedMs, submit_retries: submitRetries, submitted: stepSubmitted, ...(stepConfirmed === null ? {} : { submit_confirmed: stepConfirmed }), ...sources });
       await writeResult({ ok: false, submitted: chainSubmitted, error: 'chain timeout', partial: true, steps_completed: i, sessionId, sent_at: step0SentAt, steps, total_waited_ms: totalWaitedMs });
       return;
     }
 
     if (stepConfirmed === false && verify.recoverySkipped) {
-      steps.push({ idx: i, command: step.command, sent_at: stepSentAt, waited_ms: stepWaitedMs, submit_retries: submitRetries, submitted: stepSubmitted, submit_confirmed: false });
+      steps.push({ idx: i, command: step.command, sent_at: stepSentAt, waited_ms: stepWaitedMs, submit_retries: submitRetries, submitted: stepSubmitted, submit_confirmed: false, ...sources });
       await writeResult({
         ok: false,
         submitted: chainSubmitted,
         error: ERROR_UNCONFIRMED,
-        reason: `chain step ${i} was typed but its submission was not confirmed and the recovery Enter was withheld (${verify.recoveryReason}); nothing more was typed`,
+        reason: verify.pendingNoOwnEntry
+          ? `chain step ${i}: ${reasonNoOwnEntry(getPendingOwnEntryMs())}`
+          : verify.pendingTimedOut
+          ? `chain step ${i}: ${REASON_UNCONFIRMED_BEFORE_DEADLINE}`
+          : `chain step ${i} was typed but its submission was not confirmed and the recovery Enter was withheld (${verify.recoveryReason}); nothing more was typed`,
         partial: true, steps_completed: i, sessionId, sent_at: step0SentAt, steps,
         total_waited_ms: totalWaitedMs,
       });
@@ -1501,23 +1630,29 @@ async function processTriggerFile(name, ctx, triggersDir, processedDir, onEntryR
       const result = await waitForBusyFall(sessionId, ctx, stepDeadline, verify.enterAt);
       stepWaitedMs += result.waited_ms;
       totalWaitedMs += result.waited_ms;
+      if (result.source) {
+        sources.idle_source = result.source;
+        if (result.source === 'transcript') {
+          ctx.log.info(`[trigger-watcher] Chain step ${i} turn end read from the transcript, the descriptor still reads busy:`, sessionId);
+        }
+      }
 
       if (result.sessionExited) {
         ctx.log.warn(`[trigger-watcher] Session exited during chain step ${i} turn wait:`, sessionId);
-        steps.push({ idx: i, command: step.command, sent_at: stepSentAt, waited_ms: stepWaitedMs, submit_retries: submitRetries, submitted: stepSubmitted, ...(stepConfirmed === null ? {} : { submit_confirmed: stepConfirmed }) });
+        steps.push({ idx: i, command: step.command, sent_at: stepSentAt, waited_ms: stepWaitedMs, submit_retries: submitRetries, submitted: stepSubmitted, ...(stepConfirmed === null ? {} : { submit_confirmed: stepConfirmed }), ...sources });
         await writeResult({ ok: false, submitted: chainSubmitted, error: 'session exited during wait', partial: true, steps_completed: i, sessionId, sent_at: step0SentAt, steps, total_waited_ms: totalWaitedMs });
         return;
       }
 
       if (result.timedOut) {
         ctx.log.warn(`[trigger-watcher] Chain timeout at step ${i}:`, sessionId);
-        steps.push({ idx: i, command: step.command, sent_at: stepSentAt, waited_ms: stepWaitedMs, submit_retries: submitRetries, submitted: stepSubmitted, ...(stepConfirmed === null ? {} : { submit_confirmed: stepConfirmed }) });
+        steps.push({ idx: i, command: step.command, sent_at: stepSentAt, waited_ms: stepWaitedMs, submit_retries: submitRetries, submitted: stepSubmitted, ...(stepConfirmed === null ? {} : { submit_confirmed: stepConfirmed }), ...sources });
         await writeResult({ ok: false, submitted: chainSubmitted, error: 'chain timeout', ...(result.waitingSeen ? { reason: REASON_DIALOG_OPEN_AFTER_WRITE } : {}), partial: true, steps_completed: i, sessionId, sent_at: step0SentAt, steps, total_waited_ms: totalWaitedMs });
         return;
       }
     }
 
-    steps.push({ idx: i, command: step.command, sent_at: stepSentAt, waited_ms: stepWaitedMs, submit_retries: submitRetries, submitted: stepSubmitted, ...(stepConfirmed === null ? {} : { submit_confirmed: stepConfirmed }) });
+    steps.push({ idx: i, command: step.command, sent_at: stepSentAt, waited_ms: stepWaitedMs, submit_retries: submitRetries, submitted: stepSubmitted, ...(stepConfirmed === null ? {} : { submit_confirmed: stepConfirmed }), ...sources });
   }
 
   await writeResult({
@@ -1536,6 +1671,9 @@ async function processTriggerFile(name, ctx, triggersDir, processedDir, onEntryR
       name, err && err.message);
     await writeResult({ ok: false, error: 'internal error: ' + (err && err.message), internal: true });
   } finally {
+    if (forgetTranscript) {
+      try { forgetTranscript(); } catch (_) { /* swallow */ }
+    }
     if (releaseSessionLock) releaseSessionLock();
   }
 }
