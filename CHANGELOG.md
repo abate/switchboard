@@ -9,6 +9,8 @@ What changes for you in each release of Switchboard. How to write an entry: [doc
 - Back to list and Escape from a file or diff restore Touched and Changes with their scroll position and selection. (#444)
 ### Changed
 - Touched opens on the last day's files, shows when each was last touched, and sorts by time or path. Show 10 more days extends the history, and reopening the tab reuses unchanged transcripts. (#444)
+### Fixed
+- Remote terminals recover normal resizing and refresh on return after other clients leave, and clear lingering connections after a restart within the same app profile. Separate dev and test instances keep each other's live terminals attached. (#452)
 
 ## v0.0.88 — 2026-10-03
 
