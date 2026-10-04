@@ -34,7 +34,7 @@ const TOUCHED_STATE_LABELS = {
 };
 
 const TOUCHED_STATE_TITLES = {
-  present: 'On disk now. Click to open it in the file viewer.',
+  present: 'On disk now. Click to open it in the editor.',
   gone: 'This file no longer exists on disk.',
   refused: 'Not opened: this path is in a protected location.',
   unreadable: 'Could not be read from disk.',
@@ -137,7 +137,7 @@ function renderTouchedTab(sessionId, tab) {
   if (!touchedContainerEl) return;
   const shown = !!tab && tab.type === 'touched';
   touchedContainerEl.style.display = shown ? 'flex' : 'none';
-  setHeaderToggle(touchedToggleBtn, shown);
+  setHeaderToggle(touchedToggleBtn, shown || tab?.returnList?.type === 'touched');
   if (shown) {
     renderTouchedContent(sessionId, tab);
     window.restorePanelListScroll(touchedListEl, tab);
@@ -146,7 +146,9 @@ function renderTouchedTab(sessionId, tab) {
 
 function toggleTouchedTab(sessionId) {
   const state = getSessionState(sessionId);
-  if (state.currentTab && state.currentTab.type === 'touched') {
+  if (state.currentTab && (state.currentTab.type === 'touched' || state.currentTab.returnList?.type === 'touched')) {
+    if (!confirmDiscardChangesEdits(state.currentTab)) return;
+    destroyCurrentTab(state, { stash: false });
     state.currentTab = null;
     endCurrentTab(sessionId, state);
     return;
@@ -157,6 +159,17 @@ function toggleTouchedTab(sessionId) {
 function openTouchedTab(sessionId) {
   const state = getSessionState(sessionId);
   destroyCurrentTab(state);
+  if (state.touchedStash) {
+    state.currentTab = createChangesTab();
+    state.currentTab.loading = false;
+    state.panelVisible = true;
+    restoreChangesEdits(sessionId, state, state.currentTab, 'touched');
+    if (currentPanelSessionId === sessionId) {
+      showPanel(state);
+      renderPanel(sessionId);
+    }
+    return;
+  }
   state.currentTab = {
     type: 'touched',
     label: 'Touched files',
@@ -210,7 +223,7 @@ async function openTouchedFile(sessionId, tab, filePath) {
   tab.opening = true;
   let result;
   try {
-    result = await window.api.readFileForPanel(filePath);
+    result = await window.api.readFileForPanel(filePath, { editor: true });
   } catch (err) {
     result = { ok: false, error: (err && err.message) || 'could not read the file' };
   }
@@ -224,7 +237,7 @@ async function openTouchedFile(sessionId, tab, filePath) {
   }
   tab.selection = filePath;
   for (const row of touchedListEl.querySelectorAll('.touched-file-row')) row.classList.toggle('selected', row.dataset.path === filePath);
-  openFileTab(sessionId, { filePath, content: result.content, returnList: tab });
+  openTouchedEditor(sessionId, filePath, result, tab);
 }
 
 function plural(n, one, many) {

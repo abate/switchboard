@@ -980,9 +980,12 @@ ipcMain.on('mcp-diff-response', (_event, sessionId, diffId, action, editedConten
   resolvePendingDiff(sessionId, diffId, action, editedContent);
 });
 
-ipcMain.handle('read-file-for-panel', async (_event, filePath) => {
+ipcMain.handle('read-file-for-panel', async (_event, filePath, opts) => {
   try {
     const resolved = path.resolve(filePath);
+    if (gitChangesFile.hasGitSegment(filePath) || gitChangesFile.hasGitSegment(fs.realpathSync.native(resolved))) {
+      return { ok: false, error: 'the git directory is not editable', reason: 'git-dir' };
+    }
     if (isSensitivePath(resolved)) return { ok: false, error: 'access to sensitive path denied' };
     // A file link in terminal output decides this path, so the size is not
     // ours -- see .ai/contexts/viewer-panel.md, "Bounds".
@@ -993,7 +996,15 @@ ipcMain.handle('read-file-for-panel', async (_event, filePath) => {
     }
     const buf = fs.readFileSync(resolved);
     if (buf.includes(0)) return { ok: false, error: 'binary file' };
-    return { ok: true, content: buf.toString('utf8') };
+    const content = gitChangesFile.decodeUtf8(buf);
+    if (content === null) return { ok: false, error: 'file is not valid UTF-8', reason: 'encoding' };
+    if (opts?.editor) {
+      const pair = await gitChangesFile.readTouchedChangesFile({ absolutePath: resolved, maxBytes: PANEL_FILE_MAX_BYTES });
+      if (!pair.ok || pair.git) return pair;
+      const current = gitChangesFile.toLf(content);
+      return { ok: true, git: false, original: current, current, readOnly: !!pair.readOnly };
+    }
+    return { ok: true, content };
   } catch (err) {
     return { ok: false, error: err.message, code: err.code };
   }
@@ -1006,7 +1017,24 @@ const panelSaves = createMainPanelSaves({
   onError: (err) => console.error('Error saving memory file:', err),
 });
 
-ipcMain.handle('save-file-for-panel', (_event, filePath, content, expected) => panelSaves.saveFileForPanel(filePath, content, expected));
+ipcMain.handle('save-file-for-panel', async (_event, filePath, content, expected, opts) => {
+  try {
+    if (gitChangesFile.hasGitSegment(filePath) || gitChangesFile.hasGitSegment(fs.realpathSync.native(filePath))) {
+      return { ok: false, error: 'the git directory is not editable', reason: 'git-dir' };
+    }
+    if (fs.lstatSync(filePath).isSymbolicLink()) return { ok: false, error: 'symbolic links are read-only', reason: 'symlink' };
+    if (isSensitivePath(path.resolve(filePath))) return { ok: false, error: 'access to sensitive path denied' };
+    if (gitChangesFile.decodeUtf8(fs.readFileSync(filePath)) === null) return { ok: false, error: 'file is not valid UTF-8', reason: 'encoding' };
+    if (!opts?.git) return panelSaves.saveFileForPanel(filePath, content, expected);
+    const result = await gitChangesFile.writeTouchedChangesFile({ absolutePath: filePath, content, version: opts.version, maxBytes: PANEL_FILE_MAX_BYTES });
+    if (!result.ok) return result;
+    if (/[\\/]\.work-files[\\/]/.test(result.savedPath)) invalidateFtsSignature('work-file');
+    if (result.savedPath.endsWith('.md')) invalidateFtsSignature('memory');
+    return { ok: true, version: result.version };
+  } catch (err) {
+    return { ok: false, error: err.code === 'ENOENT' ? 'File does not exist' : err.message };
+  }
+});
 
 // ── File Watching (for viewer panels) ────────────────────────────────
 const fileWatchers = createViewerWatchRegistry({
