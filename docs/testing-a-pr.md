@@ -144,10 +144,24 @@ create two projects: a committed fixture git repository and a plain directory,
 each with a synthetic transcript. It does not copy your database or history.
 
 Inherited `CLAUDE*`, `GIT_*`, `ANTHROPIC_*` and `AWS_*` variables are removed
-case-insensitively in both `ALLOW_CLAUDE` modes, along with `ORIGINAL_PATH`
-and `ELECTRON_RUN_AS_NODE`. Git uses an empty
+case-insensitively in both `ALLOW_CLAUDE` modes, along with `GH_TOKEN`,
+`GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`,
+`SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `OPENAI_API_KEY`,
+`GOOGLE_APPLICATION_CREDENTIALS`, `ORIGINAL_PATH` and `ELECTRON_RUN_AS_NODE`.
+Names ending in `_TOKEN`, `_API_KEY`, `_APIKEY`, `_SECRET`, `_SECRET_KEY`,
+`_PASSWORD` or `_PAT`, names starting with `GLAB_`, `GITLAB_` or `AZURE_`, and
+`DOCKER_AUTH_CONFIG` are also removed case-insensitively. `HTTP_PROXY`,
+`HTTPS_PROXY` and `ALL_PROXY` are removed when their values contain credentials
+in the form `scheme://user:pass@`; credential-free proxies are preserved.
+Git uses an empty
 global configuration in the temporary HOME and skips the system config;
 fixture commits receive a synthetic identity only during setup.
+
+On Windows, the OpenSSH agent normally listens on
+`\\.\pipe\openssh-ssh-agent`, and Pageant can also be available without an
+environment variable. Removing `SSH_AUTH_SOCK` and `SSH_AGENT_PID` therefore
+likely does not cut off access to these agents. This behavior in isolated mode
+is unverified.
 
 A refusing `claude` stub is placed **first on PATH**, with shell, `.cmd` and
 PowerShell forms. Opening a synthetic session cannot start the real command
@@ -164,6 +178,12 @@ HOME and deleted on exit. On macOS, the CLI's OAuth login lives in the Keychain,
 independent of HOME, so an existing login can remain available. No credentials
 file is copied from your real HOME. The launch banner states
 whether the real command is enabled and explains the temporary login when it is.
+
+Managed settings are system-wide: on Windows, the locations are
+`C:\Program Files\ClaudeCode\managed-settings.json` and the legacy
+`C:\ProgramData\ClaudeCode\managed-settings.json`. Both sit outside `HOME`, so
+if either file is present, its settings still apply to the isolated instance. This interaction,
+including the logged-out behavior with managed settings present, is unverified.
 
 On Windows, both launch modes treat PATH names case-insensitively and pass a
 single `PATH` key to the child. If both `Path` and `PATH` exist, the exact `PATH`
