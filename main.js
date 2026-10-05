@@ -69,7 +69,8 @@ function spawnPty(file, args, opts) {
 
 // Shell profiles → shell-profiles.js
 const { discoverShellProfiles, getShellProfiles, resolveShell, isWindows, isWslShell, windowsToWslPath, shellArgs, quoteArgvForShell } = require('./shell-profiles');
-const { startScheduler, scheduleBindRefusals, resolveScheduleSandbox, scheduleRegistry, initialScheduleProjects } = require('./schedule-runner');
+const { startScheduler, scheduleBindRefusals, resolveScheduleSandbox, scheduleRegistry, initialScheduleProjects, scanSchedules, setScheduleEnabled } = require('./schedule-runner');
+const { applyAndPersistArchived, clearArchivedEntry, archivePlanForGroups, validArchiveGroups, archiveProjectFolders, reenableOfferedSchedules, dismissReenableOffer } = require('./archived-projects');
 const { encodeProjectPath } = require('./encode-project-path');
 const { SETTING_DEFAULTS } = require('./public/setting-defaults');
 const { scanMdFiles, acceptMdFile } = require('./scan-md-files');
@@ -709,6 +710,7 @@ ipcMain.handle('add-project', (_event, projectPath) => {
       global.hiddenProjects = global.hiddenProjects.filter(p => p !== projectPath);
       setSetting('global', global);
     }
+    clearArchivedEntry(getSetting, setSetting, null, projectPath);
 
     // Create the corresponding folder in ~/.claude/projects/ so it persists
     const folder = encodeProjectPath(projectPath);
@@ -762,6 +764,46 @@ ipcMain.handle('remove-project', (_event, projectPath, folderKey) => {
     return { error: err.message };
   }
 });
+
+// --- IPC: archive a project folder — see .ai/contexts/session-cache.md ("Archived projects") ---
+function projectArchivePlan(groups) {
+  return archivePlanForGroups(groups, {
+    registered: scheduleProjects().list(),
+    scan: (projectPath) => scanSchedules(log, [projectPath]),
+    realpath: fs.realpathSync,
+  });
+}
+
+function archiveDeps() {
+  return {
+    isInitialScanComplete,
+    plan: projectArchivePlan,
+    setEnabled: setScheduleEnabled,
+    getAllCached, resolveFolderDir, refreshFolder,
+    buildProjects: () => mergePlaceholderSessions(buildProjectsFromCache(true)),
+    activeSessions, getSetting, setSetting,
+    notify: notifyRendererProjectsChanged,
+    now: () => new Date().toISOString(),
+  };
+}
+
+ipcMain.handle('get-project-archive-plan', (_event, groups) => {
+  if (!isInitialScanComplete()) return { indexing: true };
+  return { schedules: projectArchivePlan(validArchiveGroups(groups)) };
+});
+
+ipcMain.handle('archive-project', (_event, groups, opts) => {
+  const res = archiveProjectFolders(groups, opts, archiveDeps());
+  if (res.error) log.warn(`[archive-project] failed: ${res.error} disabled=${(res.disabled || []).length}`);
+  else log.info(`[archive-project] disabled=${res.disabled.length} failed=${res.failed.length}`);
+  return res;
+});
+
+ipcMain.handle('reenable-project-schedules', (_event, projectPath, folderKey) =>
+  reenableOfferedSchedules(projectPath, folderKey, archiveDeps()));
+
+ipcMain.handle('dismiss-schedule-reenable-offer', (_event, projectPath, folderKey) =>
+  dismissReenableOffer(projectPath, folderKey, archiveDeps()));
 
 // --- IPC: remap-project ---
 
@@ -888,6 +930,7 @@ ipcMain.handle('delete-worktree', (_event, worktreePath) => {
           setSetting('global', global);
         }
       } catch {}
+      try { clearArchivedEntry(getSetting, setSetting, null, normalizedPath); } catch {}
 
       // Also clean up folder meta
       try {
@@ -1122,7 +1165,7 @@ ipcMain.handle('get-projects', async (_event, showArchived) => {
       reconcileCacheFromFilesystem();
     }
 
-    return annotateRemoteAttachable(mergePlaceholderSessions(buildProjectsFromCache(showArchived)));
+    return annotateRemoteAttachable(applyAndPersistArchived(mergePlaceholderSessions(buildProjectsFromCache(showArchived)), showArchived, { getSetting, setSetting }));
   } catch (err) {
     console.error('Error listing projects:', err);
     return [];
