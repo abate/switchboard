@@ -1690,6 +1690,15 @@ function buildSessionItem(session) {
     summaryEl.prepend(badge);
   }
 
+  // see .ai/contexts/bg-agents.md ("The sidebar")
+  if (typeof bgAgentSessionIds !== 'undefined' && bgAgentSessionIds.has(String(session.sessionId).toLowerCase())) {
+    const badge = document.createElement('span');
+    badge.className = 'bg-badge';
+    badge.title = 'Background session run by the claude daemon — click to attach';
+    badge.textContent = 'bg';
+    summaryEl.prepend(badge);
+  }
+
   if (session.type === 'terminal') {
     const badge = document.createElement('span');
     badge.className = 'terminal-badge';
