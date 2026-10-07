@@ -156,7 +156,7 @@ const {
   upsertSearchEntries, updateSearchTitle, deleteSearchSession, deleteSearchFolder, deleteSearchType,
   searchByType, isSearchIndexPopulated, searchFtsRecreated,
   getSetting, setSetting, deleteSetting, listSettingKeys,
-  isInitialScanComplete, setInitialScanComplete,
+  isInitialScanComplete, setInitialScanComplete, getCachedMissingEntrypoint, setCachedEntrypoints,
   getDailyMetrics, getDailyModelTokens, getModelUsage, getTotalCounts,
   closeDb,
   DB_PATH,
@@ -486,11 +486,11 @@ sessionCache.init({
     deleteCachedFolder, getCachedByFolder, upsertCachedSessions, deleteCachedSession, replaceSessionMetrics, touchCachedModified,
     deleteSearchFolder, deleteSearchSession, upsertSearchEntries,
     setFolderMeta, getFolderMeta, getAllFolderMeta, getAllMeta, getAllCached, getSetting, getMeta, setName,
-    isInitialScanComplete, setInitialScanComplete,
+    isInitialScanComplete, setInitialScanComplete, getCachedMissingEntrypoint, setCachedEntrypoints, getCachedSession,
   },
 });
 const { readSessionFile, readFolderFromFilesystem, refreshFolder, reconcileCacheFromFilesystem,
-        buildProjectsFromCache, notifyRendererProjectsChanged, sendStatus, populateCacheViaWorker,
+        buildProjectsFromCache, backfillEntrypoints, revealIfSdkSession, notifyRendererProjectsChanged, sendStatus, populateCacheViaWorker,
         scanFoldersViaWorker, setRemoteRoots, resolveFolderDir, isIndexingFinished } = sessionCache;
 const { resolveJsonlPath, readSubagentMeta } = require('./read-session-file');
 
@@ -1168,6 +1168,7 @@ ipcMain.handle('get-projects', async (_event, showArchived) => {
       // finding F1 -- see test/get-projects-cold-start-reconcile.test.js).
       reconcileCacheFromFilesystem();
     }
+    backfillEntrypoints();
 
     return annotateRemoteAttachable(applyAndPersistArchived(mergePlaceholderSessions(buildProjectsFromCache(showArchived)), showArchived, { getSetting, setSetting }));
   } catch (err) {
@@ -2509,6 +2510,7 @@ function registerRemoteAttachSession(sessionId, { alias, projectPath, cwd, ptyPr
     _openedAt: Date.now(),
   };
   activeSessions.set(sessionId, remoteSession);
+  revealIfSdkSession(sessionId);
   wireSessionPty(remoteSession, sessionId, ptyProcess);
   ptyProcess.onResizeAllowed?.(() => {
     if (activeSessions.get(sessionId) !== remoteSession || remoteSession.exited || remoteSession.remoteResizeAllowed) return;
@@ -2878,6 +2880,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
     host: null, kind: 'local-pty',
   };
   activeSessions.set(sessionId, session);
+  if (!isPlainTerminal) revealIfSdkSession(sessionId);
   if (!isPlainTerminal && !panelOwnerId) activityReporter.sessionStarted({ sessionId, project: projectPath });
 
   // see .ai/contexts/cli-session-state.md

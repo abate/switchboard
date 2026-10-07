@@ -164,6 +164,8 @@ let sessionOpenedOutsideRestore = false;
 // see .ai/contexts/cli-session-state.md ("Live elsewhere")
 const skippedWorkingSetEntries = new Map();
 let restoreSavedIndex = new Map();
+let restoreAwaitingConsent = [];
+const restoreInFlight = new Map();
 
 // Serialise concurrent read-modify-write calls so two async persist paths
 // (e.g. sidebar-resize and a working-set flush arriving in the same tick)
@@ -185,16 +187,26 @@ function persistWorkingSet() {
         active: sessionId === activeSessionId,
       });
     }
-    const skipped = [...skippedWorkingSetEntries.values()]
+    const held = [...skippedWorkingSetEntries.values(), ...pendingRestoreEntries()]
       .filter(({ item }) => !openSessions.has(item.sessionId))
       .sort((a, b) => a.index - b.index);
-    for (const { item, index } of skipped) {
+    for (const { item, index } of held) {
       set.splice(Math.min(index, set.length), 0, { sessionId: item.sessionId, projectPath: item.projectPath, active: false });
     }
     global.openWorkingSet = set;
     await window.api.setSetting('global', global);
   }).catch((e) => { console.warn('[switchboard] failed to persist working set', e); });
   return _persistChain;
+}
+
+// see .ai/contexts/session-cache.md ("Working-set restore: retry until indexing is done")
+function pendingRestoreEntries() {
+  const pending = [...restoreAwaitingConsent, ...restoreInFlight.values()];
+  if (restorePlanner && !restorePlanner.isSettled()) pending.push(...restorePlanner.pending());
+  return pending.map(item => ({
+    item,
+    index: restoreSavedIndex.has(item.sessionId) ? restoreSavedIndex.get(item.sessionId) : Number.MAX_SAFE_INTEGER,
+  }));
 }
 
 function schedulePersistWorkingSet() {
@@ -208,23 +220,35 @@ function schedulePersistWorkingSet() {
 
 async function runRestore(list) {
   const pending = list.filter(item => sessionMap.has(item.sessionId) && !openSessions.has(item.sessionId));
-  const liveById = await liveElsewhereMany(pending.map(item => item.sessionId), { api: window.api });
+  for (const item of pending) restoreInFlight.set(item.sessionId, item);
   const skippedNow = [];
-  for (const [position, item] of list.entries()) {
-    const s = sessionMap.get(item.sessionId);
-    if (!s) continue;
-    if (openSessions.has(item.sessionId)) continue;
-    // Resume with the project's current "new session" defaults, exactly like a
-    // manual session relaunch — not options frozen from a previous launch.
-    const live = liveById[item.sessionId] || null;
-    const opened = await openSession(s, undefined, { automatic: true, live });
-    if (opened === false) {
-      const index = restoreSavedIndex.has(item.sessionId) ? restoreSavedIndex.get(item.sessionId) : position;
-      skippedWorkingSetEntries.set(item.sessionId, { item, index });
-      skippedNow.push({ session: s, live });
-      continue;
+  try {
+    const liveById = await liveElsewhereMany(pending.map(item => item.sessionId), { api: window.api });
+    for (const [position, item] of list.entries()) {
+      const s = sessionMap.get(item.sessionId);
+      if (!s || openSessions.has(item.sessionId)) {
+        restoreInFlight.delete(item.sessionId);
+        continue;
+      }
+      // Resume with the project's current "new session" defaults, exactly like a
+      // manual session relaunch — not options frozen from a previous launch.
+      const live = liveById[item.sessionId] || null;
+      let opened;
+      try {
+        opened = await openSession(s, undefined, { automatic: true, live });
+      } finally {
+        restoreInFlight.delete(item.sessionId);
+      }
+      if (opened === false) {
+        const index = restoreSavedIndex.has(item.sessionId) ? restoreSavedIndex.get(item.sessionId) : position;
+        skippedWorkingSetEntries.set(item.sessionId, { item, index });
+        skippedNow.push({ session: s, live });
+        continue;
+      }
+      await new Promise(r => setTimeout(r, RESTORE_STAGGER_MS));
     }
-    await new Promise(r => setTimeout(r, RESTORE_STAGGER_MS));
+  } finally {
+    for (const item of pending) restoreInFlight.delete(item.sessionId);
   }
   if (skippedNow.length) showLiveElsewhereNotice(skippedNow);
   // Activate the entry marked active (or the last one)
@@ -301,9 +325,11 @@ async function tickRestorePlanner() {
     `<button class="restore-toast-btn restore-toast-restore">Restore</button>` +
     `<button class="restore-toast-btn restore-toast-dismiss">Dismiss</button>`;
   document.body.appendChild(toast);
+  restoreAwaitingConsent = candidates;
 
   toast.querySelector('.restore-toast-restore').addEventListener('click', async () => {
     toast.remove();
+    restoreAwaitingConsent = [];
     restoringWorkingSet = true;
     try {
       await runRestore(candidates);
@@ -314,6 +340,7 @@ async function tickRestorePlanner() {
   });
   toast.querySelector('.restore-toast-dismiss').addEventListener('click', () => {
     toast.remove();
+    restoreAwaitingConsent = [];
   });
 }
 
