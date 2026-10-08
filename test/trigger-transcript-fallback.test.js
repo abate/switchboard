@@ -35,6 +35,175 @@ const systemEntry = (at, subtype) => ({ type: 'system', subtype, timestamp: iso(
 const queueOp     = (at, operation) => ({ type: 'queue-operation', operation, timestamp: iso(at) });
 const jsonl = (entries) => entries.map((e) => JSON.stringify(e)).join('\n') + '\n';
 
+test('i488-fix2: a bounded cursor finds a boundary after oversized records across several polls', () => {
+  const dir = mkTmp('sw-compact-cursor-');
+  const file = path.join(dir, 'session.jsonl');
+  const reader = createTranscriptTurnReader();
+  const boundary = { ...systemEntry(2000, 'compact_boundary'), uuid: 'fresh', compactMetadata: { trigger: 'manual' } };
+  try {
+    fs.writeFileSync(file, jsonl([userPrompt(1000)]));
+    const snapshot = reader.read(file);
+    fs.appendFileSync(file, jsonl([{ type: 'attachment', content: 'x'.repeat(600_000) }, boundary,
+      { type: 'attachment', content: 'x'.repeat(600_000) }]));
+    const realRead = fs.readSync;
+    let bytes = 0;
+    fs.readSync = (...args) => { const n = realRead(...args); bytes += n; return n; };
+    const observed = [];
+    try {
+      for (let i = 0; i < 6; i += 1) {
+        bytes = 0;
+        observed.push(...reader.read(file, snapshot.compactionCursor).compactBoundaries);
+        assert.ok(bytes <= 512 * 1024, 'one poll must read at most a tail plus one cursor chunk');
+        assert.ok(snapshot.compactionCursor.pending.length <= 256 * 1024, 'unfinished records must remain bounded');
+      }
+    } finally { fs.readSync = realRead; }
+    assert.ok(observed.some((entry) => entry.uuid === 'fresh'), 'the cursor must progress even when file size stays fixed');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('i488-fix2: a partial boundary is observed only after its record finishes', () => {
+  const dir = mkTmp('sw-compact-partial-');
+  const file = path.join(dir, 'session.jsonl');
+  const reader = createTranscriptTurnReader();
+  const record = Buffer.from(JSON.stringify({ ...systemEntry(2000, 'compact_boundary'), uuid: 'fresh-🧭', compactMetadata: { trigger: 'manual' } }));
+  const splitAt = record.indexOf(Buffer.from('🧭')) + 2;
+  try {
+    fs.writeFileSync(file, jsonl([userPrompt(1000)]));
+    const snapshot = reader.read(file);
+    fs.appendFileSync(file, record.subarray(0, splitAt));
+    assert.deepEqual(reader.read(file, snapshot.compactionCursor).compactBoundaries, []);
+    fs.appendFileSync(file, Buffer.concat([record.subarray(splitAt), Buffer.from('\n' + jsonl([{ type: 'attachment', content: 'x'.repeat(300_000) }]))]));
+    assert.deepEqual(reader.read(file, snapshot.compactionCursor).compactBoundaries, [{ at: 2000, uuid: 'fresh-🧭' }]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const operation of ['truncate', 'replace', 'unreadable']) {
+  test(`i488-fix2: the cursor fails closed when the transcript becomes ${operation}`, () => {
+    const dir = mkTmp('sw-compact-replaced-');
+    const file = path.join(dir, 'session.jsonl');
+    const reader = createTranscriptTurnReader();
+    const realOpen = fs.openSync;
+    try {
+      fs.writeFileSync(file, jsonl([{ type: 'attachment', content: 'x'.repeat(1000) }]));
+      const snapshot = reader.read(file);
+      if (operation === 'replace') fs.renameSync(file, path.join(dir, 'old.jsonl'));
+      fs.writeFileSync(file, jsonl([{ ...systemEntry(2000, 'compact_boundary'), compactMetadata: { trigger: 'manual' } }]));
+      if (operation !== 'truncate') fs.appendFileSync(file, jsonl([{ type: 'attachment', content: 'x'.repeat(2000) }]));
+      if (operation === 'unreadable') reader.read(file);
+      if (operation === 'unreadable') fs.openSync = () => { throw new Error('unreadable'); };
+      assert.equal(reader.read(file, snapshot.compactionCursor), null);
+      if (operation === 'truncate') {
+        fs.appendFileSync(file, jsonl([{ type: 'attachment', content: 'x'.repeat(2000) }]));
+        assert.equal(reader.read(file, snapshot.compactionCursor), null, 'observed truncation must invalidate the cursor permanently');
+      }
+    } finally {
+      fs.openSync = realOpen;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('i488-fix2: the cursor skips the remainder of an incomplete pre-write record', () => {
+  const dir = mkTmp('sw-compact-old-partial-');
+  const file = path.join(dir, 'session.jsonl');
+  const reader = createTranscriptTurnReader();
+  try {
+    fs.writeFileSync(file, 'an incomplete pre-existing record ');
+    const snapshot = reader.read(file);
+    fs.appendFileSync(file, jsonl([{ ...systemEntry(2000, 'compact_boundary'), compactMetadata: { trigger: 'manual' } }]));
+    assert.deepEqual(reader.read(file, snapshot.compactionCursor).compactBoundaries, []);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('i488-fix3: the cursor refuses a changed transcript path even with the same device and inode', () => {
+  const dir = mkTmp('sw-compact-cursor-path-');
+  const file = path.join(dir, 'session.jsonl');
+  const alias = path.join(dir, 'alias.jsonl');
+  const reader = createTranscriptTurnReader();
+  try {
+    fs.writeFileSync(file, jsonl([userPrompt(1000)]));
+    const snapshot = reader.read(file);
+    fs.linkSync(file, alias);
+    fs.appendFileSync(alias, jsonl([{ ...systemEntry(2000, 'compact_boundary'), uuid: 'fresh', compactMetadata: { trigger: 'manual' } }]));
+    assert.equal(fs.statSync(alias).dev, snapshot.compactionCursor.dev);
+    assert.equal(fs.statSync(alias).ino, snapshot.compactionCursor.ino);
+    assert.equal(reader.read(alias, snapshot.compactionCursor), null);
+    assert.equal(snapshot.compactionCursor.invalid, true);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('i488-fix3: the cursor refuses a same-path device change with the same inode', () => {
+  const dir = mkTmp('sw-compact-cursor-device-');
+  const file = path.join(dir, 'session.jsonl');
+  const reader = createTranscriptTurnReader();
+  const realStat = fs.statSync;
+  const realFstat = fs.fstatSync;
+  try {
+    fs.writeFileSync(file, jsonl([userPrompt(1000)]));
+    const snapshot = reader.read(file);
+    fs.appendFileSync(file, jsonl([{ ...systemEntry(2000, 'compact_boundary'), uuid: 'fresh', compactMetadata: { trigger: 'manual' } }]));
+    const device = snapshot.compactionCursor.dev + 1;
+    fs.statSync = (...args) => ({ ...realStat(...args), dev: device });
+    fs.fstatSync = (...args) => ({ ...realFstat(...args), dev: device });
+    assert.equal(reader.read(file, snapshot.compactionCursor), null);
+    assert.equal(snapshot.compactionCursor.invalid, true);
+  } finally {
+    fs.statSync = realStat;
+    fs.fstatSync = realFstat;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+for (const race of ['device', 'size']) {
+  test(`i488-fix3: an opened-file ${race} change before a cursor read fails closed`, () => {
+    const dir = mkTmp('sw-compact-opened-stat-');
+    const file = path.join(dir, 'session.jsonl');
+    const reader = createTranscriptTurnReader();
+    const realFstat = fs.fstatSync;
+    try {
+      fs.writeFileSync(file, jsonl([userPrompt(1000)]));
+      const snapshot = reader.read(file);
+      fs.appendFileSync(file, jsonl([{ ...systemEntry(2000, 'compact_boundary'), uuid: 'fresh', compactMetadata: { trigger: 'manual' } }]));
+      reader.read(file);
+      const offset = snapshot.compactionCursor.offset;
+      fs.fstatSync = (...args) => {
+        const actual = realFstat(...args);
+        return { ...actual, ...(race === 'device' ? { dev: actual.dev + 1 } : { size: snapshot.compactionCursor.offset - 1 }) };
+      };
+      assert.equal(reader.read(file, snapshot.compactionCursor), null);
+      assert.equal(snapshot.compactionCursor.offset, offset);
+      fs.fstatSync = realFstat;
+      assert.deepEqual(reader.read(file, snapshot.compactionCursor).compactBoundaries, [{ at: 2000, uuid: 'fresh' }]);
+    } finally {
+      fs.fstatSync = realFstat;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const race of ['identity', 'short read']) {
+  test(`i488-fix2: a ${race} change during a cursor read fails closed`, () => {
+    const dir = mkTmp('sw-compact-read-race-');
+    const file = path.join(dir, 'session.jsonl');
+    const reader = createTranscriptTurnReader();
+    const realFstat = fs.fstatSync;
+    const realRead = fs.readSync;
+    try {
+      fs.writeFileSync(file, jsonl([userPrompt(1000)]));
+      const snapshot = reader.read(file);
+      fs.appendFileSync(file, jsonl([{ ...systemEntry(2000, 'compact_boundary'), compactMetadata: { trigger: 'manual' } }]));
+      reader.read(file);
+      if (race === 'identity') fs.fstatSync = (...args) => ({ ...realFstat(...args), ino: -1 });
+      else fs.readSync = () => 0;
+      assert.equal(reader.read(file, snapshot.compactionCursor), null);
+    } finally {
+      fs.fstatSync = realFstat;
+      fs.readSync = realRead;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
 // ── The transcript classification ───────────────────────────────────────────
 
 test('classify: a closed assistant turn followed only by bookkeeping entries is closed, stamped at that entry', () => {
@@ -648,7 +817,7 @@ test('chain: /compact as step 0 with the descriptor held busy -> confirmed from 
     assert.equal(s.written.filter((w) => w.data === '\r').length, 2, 'a recovery Enter was typed into the busy CLI');
     assert.equal(result.ok, true);
     assert.equal(result.steps[0].submit_confirmed, true);
-    assert.equal(result.steps[0].confirm_source, 'transcript');
+    assert.equal(result.steps[0].confirm_source, 'compact_boundary');
     assert.equal(result.steps[0].submitted, 'confirmed');
     assert.equal(result.steps[0].idle_source, 'transcript');
     assert.equal(result.steps[1].ready_source, 'transcript');
@@ -671,7 +840,7 @@ test('chain: /compact as the only step with the descriptor held busy -> confirme
 
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(result.steps[0].submit_confirmed, true);
-    assert.equal(result.steps[0].confirm_source, 'transcript');
+    assert.equal(result.steps[0].confirm_source, 'compact_boundary');
   } finally {
     s.cleanup();
   }
@@ -806,6 +975,8 @@ test('chain: a pending step confirmed by the descriptor reacting later reports t
 
     assert.equal(result.steps[0].submit_confirmed, true, JSON.stringify(result));
     assert.equal(result.steps[0].confirm_source, 'descriptor');
+    assert.equal(result.steps[0].turn_observed, true);
+    assert.equal(result.steps_with_turn_observed, 1);
     assert.ok(s.written.some((w) => w.data === 'second step'));
   } finally {
     s.cleanup();
