@@ -488,16 +488,35 @@ function narrowSessionsToSearch(sessions, matchIds) {
   return sessions.filter(s => matchIds.has(s.sessionId) || matchedParents.has(s.sessionId));
 }
 
-function buildSlugGroup(slug, sessions, subagentIndex) {
+function buildSlugGroup(slug, sessions, subagentIndex, scheduled = false, project, legacyScheduleScopes) {
   const group = document.createElement('div');
-  const id = slugId(slug);
-  const expanded = getExpandedSlugs().has(id);
+  const id = scheduled ? 'schedule-' + encodeURIComponent(JSON.stringify([project.remoteAlias || '', project.projectPath, slug])) : slugId(slug);
+  const expandedSlugs = getExpandedSlugs();
+  if (scheduled) {
+    try {
+      const migrated = new Set(JSON.parse(sessionStorage.getItem('migratedScheduleSlugs') || '[]'));
+      if (!migrated.has(id)) {
+        migrated.add(id);
+        sessionStorage.setItem('migratedScheduleSlugs', JSON.stringify([...migrated]));
+        const legacyId = slugId(slug);
+        if (!migrated.has(legacyId)) {
+          migrated.add(legacyId);
+          sessionStorage.setItem('migratedScheduleSlugs', JSON.stringify([...migrated]));
+          if (legacyScheduleScopes.get(legacyId)?.size === 1 && expandedSlugs.has(legacyId)) {
+            expandedSlugs.add(id);
+            sessionStorage.setItem('expandedSlugs', JSON.stringify([...expandedSlugs]));
+          }
+        }
+      }
+    } catch {}
+  }
+  const expanded = expandedSlugs.has(id);
   group.className = expanded ? 'slug-group js-stateful' : 'slug-group collapsed js-stateful';
   group.id = id;
 
   const mostRecent = sessions.reduce((a, b) =>
     new Date(b.modified) > new Date(a.modified) ? b : a);
-  const displayName = cleanDisplayName(mostRecent.name || mostRecent.aiTitle || mostRecent.summary || slug);
+  const displayName = scheduled ? slug : cleanDisplayName(mostRecent.name || mostRecent.aiTitle || mostRecent.summary || slug);
   const mostRecentTime = new Date(mostRecent.modified);
   const timeStr = formatDate(mostRecentTime);
 
@@ -590,6 +609,16 @@ function buildSlugGroup(slug, sessions, subagentIndex) {
 function renderProjects(projects, resort) {
   pruneStaleSubagents();
   pendingSubagentRest.clear();
+  const legacyScheduleScopes = new Map();
+  for (const project of [...cachedAllProjects, ...projects]) {
+    for (const session of project.sessions) {
+      const slug = session.scheduleSlug;
+      if (session.parentSessionId || typeof slug !== 'string' || !slug) continue;
+      const legacyId = slugId(slug);
+      if (!legacyScheduleScopes.has(legacyId)) legacyScheduleScopes.set(legacyId, new Set());
+      legacyScheduleScopes.get(legacyId).add(JSON.stringify([project.remoteAlias || '', project.projectPath, slug]));
+    }
+  }
   // see .ai/contexts/session-cache.md ("Remote hosts — busy spinner (issue #242)")
   for (const project of projects) {
     for (const session of project.sessions) seedRemoteActivity(session, project.remoteHostError);
@@ -680,9 +709,12 @@ function renderProjects(projects, resort) {
     const slugMap = new Map();
     const ungrouped = [];
     for (const session of filtered) {
-      if (session.slug) {
-        if (!slugMap.has(session.slug)) slugMap.set(session.slug, []);
-        slugMap.get(session.slug).push(session);
+      const scheduled = typeof session.scheduleSlug === 'string' && session.scheduleSlug.length > 0;
+      const slug = scheduled ? session.scheduleSlug : session.slug;
+      if (slug) {
+        const key = JSON.stringify([scheduled, slug]);
+        if (!slugMap.has(key)) slugMap.set(key, { slug, scheduled, sessions: [] });
+        slugMap.get(key).sessions.push(session);
       } else {
         ungrouped.push(session);
       }
@@ -692,11 +724,11 @@ function renderProjects(projects, resort) {
       const isRunning = activePtyIds.has(session.sessionId) || pendingSessions.has(session.sessionId);
       allItems.push({ sortTime: new Date(session.modified).getTime(), pinned: !!session.starred, running: isRunning, element: buildSessionItem(session) });
     }
-    for (const [slug, sessions] of slugMap) {
+    for (const { slug, scheduled, sessions } of slugMap.values()) {
       const mostRecentTime = Math.max(...sessions.map(s => new Date(s.modified).getTime()));
       const hasRunning = sessions.some(s => activePtyIds.has(s.sessionId) || pendingSessions.has(s.sessionId));
       const hasPinned = sessions.some(s => s.starred);
-      const element = sessions.length === 1 ? buildSessionItem(sessions[0]) : buildSlugGroup(slug, sessions, subagentIndex);
+      const element = sessions.length === 1 && !scheduled ? buildSessionItem(sessions[0]) : buildSlugGroup(slug, sessions, subagentIndex, scheduled, project, legacyScheduleScopes);
       allItems.push({ sortTime: mostRecentTime, pinned: hasPinned, running: hasRunning, element });
     }
 

@@ -175,6 +175,7 @@ function readSessionFile(filePath, folder, projectPath, opts = {}) {
     let messageCount = 0;
     let textContent = '';
     let slug = null;
+    let scheduleSlug = null;
     let customTitle = null;
     let aiTitle = null;
     let agentId = null;
@@ -201,6 +202,7 @@ function readSessionFile(filePath, folder, projectPath, opts = {}) {
         if (!lastTimestamp || entry.timestamp > lastTimestamp) lastTimestamp = entry.timestamp;
       }
       if (entry.slug && !slug) slug = entry.slug;
+      if (entry.type === 'user' && typeof entry.scheduleSlug === 'string' && entry.scheduleSlug && !scheduleSlug) scheduleSlug = entry.scheduleSlug;
       if (entry.agentId && !agentId) agentId = entry.agentId;
       if (entry.isSidechain) sidechainSeen = true;
       if (entrypoint === undefined && entry.type === 'user') entrypoint = entrypointOf(entry);
@@ -286,7 +288,7 @@ function readSessionFile(filePath, folder, projectPath, opts = {}) {
       created: firstTimestamp || stat.birthtime.toISOString(),
       modified: lastTimestamp || stat.mtime.toISOString(),
       fileMtime: stat.mtime.toISOString(),
-      messageCount, textContent, slug, customTitle, aiTitle,
+      messageCount, textContent, slug, scheduleSlug, customTitle, aiTitle,
       bridgeSessionId,
       entrypoint: typedInTerminal ? 'cli' : (entrypoint ?? ''),
       dailyMetrics,
@@ -531,14 +533,23 @@ function readSessionDisplayHeader(filePath, opts = {}) {
     let commandSummary = '';
     let assistantSeen = false;
     let slug = null, customTitle = null, aiTitle = null, agentId = null;
+    let scheduleSlug = null;
+    let scheduleSlugComplete = n === stat.size;
     let sidechainSeen = false;
     let lineCount = 0;
     for (const line of lines) {
       if (!line) continue;
-      if (++lineCount > MAX_LINES) break;
+      if (++lineCount > MAX_LINES) {
+        scheduleSlugComplete = false;
+        break;
+      }
       let entry;
-      try { entry = JSON.parse(line); } catch { continue; }
+      try { entry = JSON.parse(line); } catch {
+        scheduleSlugComplete = false;
+        continue;
+      }
       if (entry.slug && !slug) slug = entry.slug;
+      if (entry.type === 'user' && typeof entry.scheduleSlug === 'string' && entry.scheduleSlug && !scheduleSlug) scheduleSlug = entry.scheduleSlug;
       if (entry.agentId && !agentId) agentId = entry.agentId;
       if (entry.isSidechain) sidechainSeen = true;
       if (entry.type === 'assistant' || (entry.type === 'message' && entry.role === 'assistant')) {
@@ -585,7 +596,7 @@ function readSessionDisplayHeader(filePath, opts = {}) {
       sessionId: fileBase,
       summary, firstPrompt: summary,
       modified: stat.mtime.toISOString(),
-      slug, customTitle, aiTitle,
+      slug, scheduleSlug, scheduleSlugComplete, customTitle, aiTitle,
     };
   } catch {
     return null;
