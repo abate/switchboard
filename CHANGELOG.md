@@ -9,6 +9,7 @@ What changes for you in each release of Switchboard. How to write an entry: [doc
 - **Archive folder** on a project header opens a dialog that archives the folder's sessions and disables its enabled schedules, each optional, and hides the folder with its worktrees. The folder comes back, with its settings, when you add it again or a new session starts in it, and then offers to turn back on the schedules the archive disabled. (#473)
 ### Changed
 - Markdown files open formatted in Touched, with a toggle back to the source that is remembered. (#472)
+- Clicking a file in the terminal, or a file Claude opens, shows it in Touched, at the top of the list as opened when the file tools did not touch it, with its diff against HEAD when it changed. A `path:line` link opens the source at that line, symbolic links open read-only, and files Claude opens get the panel's checks, which refuse credential paths, binary files and files over 2 MB. (#472)
 - Sessions a program started through the Claude Agent SDK, such as headless runs or review agents, no longer fill the sidebar and grid. Turn off **Hide SDK-launched Sessions** in Global Settings to list them again. Sessions you have open, scheduled tasks and sessions you continued by typing in them stay listed, and the activity heatmap still counts the hidden ones. (#486)
 ### Fixed
 - When the Claude CLI reports a session's id in a different letter case, the subagents that session started or finished during a turn now show up when the turn ends. (#487)

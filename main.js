@@ -237,6 +237,8 @@ const STATS_CACHE_PATH = path.join(CLAUDE_DIR, 'stats-cache.json');
 
 // Active PTY sessions
 const activeSessions = new Map();
+// see .ai/contexts/touched-files.md ("One route into Touched")
+const exitedRemoteSessionIds = new Set();
 let mainWindow = null;
 
 // Every project root Switchboard currently knows about: live sessions plus
@@ -1831,6 +1833,7 @@ function gitChangesTargetDeps() {
     parseFolderKey,
     getRemoteSessions: (alias) => remoteIndexer.getRemoteSessions(alias),
     activeSessions,
+    wasRemoteSession: (id) => exitedRemoteSessionIds.has(id),
     resolveSessionRealCwd,
     existsSync: (p) => fs.existsSync(p),
     projectsDir: PROJECTS_DIR,
@@ -2425,6 +2428,10 @@ function wireSessionPty(session, sessionId, ptyProcess) {
       if (realId !== sessionId && activeSessions.has(sessionId)) {
         mainWindow.webContents.send('process-exited', sessionId, exitCode, exitSignal, stopped, session.generation);
       }
+    }
+    if (session.kind === 'remote-attach') {
+      exitedRemoteSessionIds.add(realId);
+      exitedRemoteSessionIds.add(sessionId);
     }
     activeSessions.delete(realId);
     // Clean up the original key too in case transition detection hasn't run yet
@@ -3081,6 +3088,7 @@ ipcMain.on('terminal-resize', (_event, sessionId, cols, rows, refresh) => {
 
 // --- IPC: close-terminal ---
 ipcMain.on('close-terminal', (_event, sessionId) => {
+  exitedRemoteSessionIds.delete(sessionId);
   const session = activeSessions.get(sessionId);
   if (session) {
     session.rendererAttached = false;
