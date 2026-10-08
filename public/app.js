@@ -176,10 +176,15 @@ let _persistChain = Promise.resolve();
 // see docs/session-restore.md ("Closing the app")
 let exitingApp = false;
 let exitingAppTimer = null;
+let persistSkippedWhileExiting = false;
+let savedWorkingSetRead = false;
 const EXIT_FLUSH_GRACE_MS = 10000;
 
 function persistWorkingSet({ final = false } = {}) {
-  if (exitingApp && !final) return _persistChain;
+  if (exitingApp && !final) {
+    persistSkippedWhileExiting = true;
+    return _persistChain;
+  }
   _persistChain = _persistChain.then(async () => {
     const g = await window.api.getSetting('global');
     const global = g || {};
@@ -217,7 +222,11 @@ function pendingRestoreEntries() {
 }
 
 function schedulePersistWorkingSet() {
-  if (restoringWorkingSet || exitingApp) return;
+  if (restoringWorkingSet) return;
+  if (exitingApp) {
+    persistSkippedWhileExiting = true;
+    return;
+  }
   if (persistWorkingSetTimer) clearTimeout(persistWorkingSetTimer);
   persistWorkingSetTimer = setTimeout(() => {
     persistWorkingSetTimer = null;
@@ -231,12 +240,21 @@ async function flushStateForExit() {
     persistWorkingSetTimer = null;
   }
   exitingApp = true;
+  persistSkippedWhileExiting = false;
   if (exitingAppTimer) clearTimeout(exitingAppTimer);
-  exitingAppTimer = setTimeout(() => { exitingApp = false; exitingAppTimer = null; }, EXIT_FLUSH_GRACE_MS);
-  if (restoringWorkingSet) return _persistChain;
+  exitingAppTimer = setTimeout(() => {
+    exitingApp = false;
+    exitingAppTimer = null;
+    if (persistSkippedWhileExiting) {
+      persistSkippedWhileExiting = false;
+      persistWorkingSet();
+    }
+  }, EXIT_FLUSH_GRACE_MS);
+  if (!savedWorkingSetRead) return _persistChain;
   return persistWorkingSet({ final: true });
 }
 window.flushStateForExit = flushStateForExit;
+if (window.api.onExitFlush) window.api.onExitFlush(() => { flushStateForExit(); });
 
 async function runRestore(list, { retryAfterIndexing = !restoreIndexingDone } = {}) {
   const pending = list.filter(item => sessionMap.has(item.sessionId) && !openSessions.has(item.sessionId));
@@ -308,6 +326,7 @@ async function restoreWorkingSet() {
   restoreMode = (g && g.restoreOnStartup) || SETTING_DEFAULTS.restoreOnStartup;
   const savedSet = (g && g.openWorkingSet) || [];
   restoreSavedIndex = new Map(savedSet.map((item, index) => [item.sessionId, index]));
+  savedWorkingSetRead = true;
 
   document.getElementById('restore-cold-toast')?.remove();
 
