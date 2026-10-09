@@ -185,7 +185,7 @@ is recorded in the test diagnostic and `.work-files/pr-body.md`.
 
 ## Decisions that were open in the issue
 
-- **Placement**: its own tab and header toggle (`Touched`, after `Changes`),
+- **Placement**: its own tab and tool-bar toggle (`Touched`, after the conditional `Diff`),
   not a section of the Changes list; the issue puts changing the Changes panel
   out of scope.
 - **Remote sessions**: the list reads the local mirror with the same parser,
@@ -290,7 +290,7 @@ symlink. No real host, SSH client or Electron process is launched.
 ## If you change this, also check
 
 - `test/session-touched-files.test.js` (extraction, resolution, walk, target resolution), `test/dom-file-panel-touched.test.js` (the route, opened rows and stashes included), `test/touched-files-wiring.test.js`, `test/dom-file-panel-goto-line.test.js`, `test/dom-file-panel-unsaved-guard.test.js`
-- `public/header-controls.js` (`HEADER_CONTROLS`, the icon) and `test/header-controls.test.js`
+- `public/header-controls.js` (`HEADER_TOGGLE_ICONS`, the icon) and `test/header-controls.test.js`
 - the guard row in `.ai/contexts/ipc-bridge.md`
 
 ## Shared editor (#450)
@@ -370,9 +370,9 @@ editor releases that watch. Dirty buffers and their return list survive
 another tab taking the slot through the Touched stashes (see "Stashed edits").
 Changes has its own single stash; each list restores only its own edits, and
 restored Save controls are
-updated after the editor mounts. The Changes header toggle is active only
+updated after the editor mounts. The Changes tool-bar toggle is active only
 for a Changes list/editor without a return list, and opens Changes when a
-Touched editor is visible. The Touched header is pressed for its list or an
+Touched editor is visible. The Touched tool-bar button is pressed for its list or an
 editor carrying its returnList. Clicking it closes that tab through the Changes
 discard confirmation instead of stashing and immediately reopening the editor.
 Switching to the other list continues to stash unsaved edits. Session idle
@@ -416,8 +416,9 @@ the terminal menu's "Open in panel", and the CLI's IDE-emulation `openFile`
   DOM is never consulted. `'mcp'` skips the check: remote sessions never get
   the bridge.
 - **An unanswered MCP diff in the slot** keeps the slot: the open is stored in
-  `state.pendingTouchedOpen` (a later one replaces it) and replayed when the
-  diff ends (see `.ai/contexts/viewer-panel.md`, "An open that arrives over a
+  `tab.pendingTouchedOpen` on that diff (a later one replaces it) and replayed
+  only when its own tab ends in the slot; another diff ending cannot consume
+  it (see `.ai/contexts/viewer-panel.md`, "An open that arrives over a
   diff").
 - **Touched not in the slot**: a fresh Touched list is opened
   (`openTouchedTab(id, {restoreStash: false})`), whatever the slot held; a dirty
@@ -437,7 +438,7 @@ the terminal menu's "Open in panel", and the CLI's IDE-emulation `openFile`
   hold format characters. A row click keeps `<path>: <reason>`.
 - **A git-changed file** opens here too, with its diff against HEAD
   (`readTouchedChangesFile`). The Changes list is not opened by a click; its
-  header toggle is the way to it.
+  tool-bar toggle is the way to it.
 - **What the editor read refuses that a link check does not**: a path git
   refuses to open (exit 128 not saying "not a git repository"), and the
   Touched path rules of `resolveTouchedPath`. A symbolic link opens read-only.
@@ -536,3 +537,7 @@ it.
 Tests: the `markdown:` tests in `test/dom-file-panel-touched.test.js` use the
 real `marked` and `DOMPurify` builds; `window.marked` is set only by the
 `loadCodeMirrorBundle` stub, as the bundle sets it in the app.
+
+The tool entry point is the right-hand bar, using the shown terminal owner.
+Changes and Touched park an unanswered Diff; its conditional button restores
+the same editor. See [tool-bar.md](tool-bar.md).

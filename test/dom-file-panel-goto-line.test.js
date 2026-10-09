@@ -9,6 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { JSDOM } = require('jsdom');
+const { registerPanelTerminals } = require('./terminal-manager-harness');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
@@ -17,7 +18,7 @@ const INDEX_HTML = `<!DOCTYPE html>
   <body>
     <div id="terminal-area"><div id="terminals"></div></div>
     <div id="terminal-header" style="display:none;">
-      <div id="terminal-header-controls"><button id="terminal-stop-btn"></button></div>
+      <div id="terminal-header-session"><button id="terminal-stop-btn"></button></div>
     </div>
   </body>
 </html>`;
@@ -52,10 +53,16 @@ function setup({ pair } = {}) {
   window.createEditableViewer = (parent) => makeView(parent, 'plain');
   Object.defineProperty(window, 'activeSessionId', { value: null, writable: true, configurable: true });
 
-  for (const f of ['splitter.js', 'session-state.js', 'session-activity-dom.js', 'session-activity.js', 'header-controls.js', 'viewer-toolbar.js', 'file-panel.js', 'touched-files-view.js']) {
+  for (const f of ['splitter.js', 'session-state.js', 'session-activity-dom.js', 'session-activity.js', 'shortcuts.js', 'header-controls.js', 'tool-bar.js', 'viewer-toolbar.js', 'file-panel.js', 'touched-files-view.js']) {
     vm.runInContext(fs.readFileSync(path.join(PUBLIC_DIR, f), 'utf8'), dom.getInternalVMContext(), { filename: f });
   }
+  window.openSessions = new Map();
+  window.gridViewActive = false;
+  window.gridCards = new Map();
+  window.isMac = false;
+  window.appShortcuts = {};
   window.initFilePanel();
+  registerPanelTerminals(dom, ['s1']);
   const ctx = dom.getInternalVMContext();
   return { window, document: window.document, calls, stateOf: id => vm.runInContext('filePanelState', ctx).get(id), destroy: () => window.close() };
 }

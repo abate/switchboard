@@ -471,6 +471,7 @@ window.api.onSessionDetected((tempId, realId) => {
   // Re-key in openSessions
   openSessions.delete(tempId);
   openSessions.set(realId, entry);
+  if (typeof syncToolBar === 'function') syncToolBar();
 
   rekeyActivityState(tempId, realId);
 
@@ -494,13 +495,13 @@ window.api.onSessionForked((oldId, newId) => {
   if (!entry) return;
 
   entry.session.sessionId = newId;
+  if (typeof rekeyFilePanelState === 'function') rekeyFilePanelState(oldId, newId);
   if (activeSessionId === oldId) setActiveSession(newId);
 
   openSessions.delete(oldId);
   openSessions.set(newId, entry);
 
-  // Re-key file panel state for the new session ID
-  if (typeof rekeyFilePanelState === 'function') rekeyFilePanelState(oldId, newId);
+  if (typeof syncToolBar === 'function') syncToolBar();
 
   rekeyActivityState(oldId, newId);
 
@@ -540,6 +541,7 @@ function applyProcessExit(sessionId, exitCode, signal, stopped) {
     return;
   }
   noteSessionExit(sessionId, exitCode, signal, stopped);
+  if (typeof setSessionMcpState === 'function' && typeof filePanelState !== 'undefined' && filePanelState.get(sessionId)) setSessionMcpState(sessionId, 'off');
   // see .ai/contexts/session-state.md ("A session main drops")
   activePtyIds.delete(sessionId);
   if (!sessionItemEl(sessionId)?.dataset.remoteAlias) dropLocalPtySession(sessionId, 'process-exited');
@@ -1553,6 +1555,25 @@ initAgentsView();
   });
 }
 
+function handleGlobalShortcut(e) {
+  if (e._handled || e.type !== 'keydown') return;
+  if (matchShortcut('agentsToggle', e, isMac, appShortcuts)) {
+    e.preventDefault();
+    toggleAgentsView();
+    return;
+  }
+  if (matchShortcut('gridToggle', e, isMac, appShortcuts)) {
+    e.preventDefault();
+    toggleGridView();
+    return;
+  }
+  if (isSessionNavKey(e)) {
+    handleSessionNavKey(e);
+    return;
+  }
+  if (typeof handleToolShortcut === 'function') handleToolShortcut(e);
+}
+
 // --- Grid view toggle button (next to resort button in sidebar filters) ---
 {
   const gridToggleBtn = document.createElement('button');
@@ -1573,22 +1594,7 @@ initAgentsView();
   // Global keyboard shortcuts (covers non-terminal focus)
   // When a terminal is focused, xterm's customKeyEventHandler fires first and sets
   // e._handled to prevent the document listener from double-firing the same action.
-  document.addEventListener('keydown', (e) => {
-    if (e._handled) return;
-    if (matchShortcut('agentsToggle', e, isMac, appShortcuts)) {
-      e.preventDefault();
-      toggleAgentsView();
-      return;
-    }
-    // Toggle grid view (default Cmd/Ctrl+Shift+G)
-    if (matchShortcut('gridToggle', e, isMac, appShortcuts)) {
-      e.preventDefault();
-      toggleGridView();
-      return;
-    }
-    // Session navigation: Cmd+Shift+[/], Cmd+Arrow
-    handleSessionNavKey(e);
-  });
+  document.addEventListener('keydown', handleGlobalShortcut);
 }
 
 // Warm up xterm.js renderer so first terminal open is fast
