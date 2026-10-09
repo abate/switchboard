@@ -4,6 +4,9 @@ What changes for you in each release of Switchboard. How to write an entry: [doc
 
 ## Unreleased
 
+### New
+- Remote sessions now have a Touched list and can open its files read-only, with their HEAD diff inside the session's repository. The list stays visible with unknown disk states when the host cannot be reached. Password databases and private keys on the host are refused. (#454)
+
 ## v0.0.90 — 2026-10-09
 
 ### New
