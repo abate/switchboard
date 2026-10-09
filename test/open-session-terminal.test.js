@@ -27,6 +27,7 @@ async function withHarness(setup, fn) {
       destroySession: (id) => calls.destroyed.push(id),
       showSession: (id) => calls.shown.push(id),
       guardResume: async () => true,
+      resolveResumeSession: require('../public/resume-guard').resolveResumeSession,
       createTerminalEntry: (session) => {
         calls.created.push(session.sessionId);
         return { initialSize: { cols: 80, rows: 24 }, terminal: { write: (text) => calls.written.push(text) } };
@@ -40,6 +41,7 @@ async function withHarness(setup, fn) {
       schedulePersistWorkingSet: () => {},
       pollActiveSessions: () => {},
       api: {
+        getSessionContinuations: async () => ({ candidates: [], unresolved: false, continued: false }),
         openTerminal: async (sessionId, projectPath, isNew, sessionOptions, initialSize) => {
           calls.openTerminal.push({ sessionId, projectPath, isNew, sessionOptions, initialSize });
           return { ok: true };
@@ -48,7 +50,7 @@ async function withHarness(setup, fn) {
     });
     setup(window, calls);
     const { openSession } = loadAppFunctions(ctx.context, {
-      declarations: ['ptyGenerations', 'pendingOpens'],
+      declarations: ['ptyGenerations', 'pendingOpens', 'continuationRetryCancelled'],
       functions: ['beginPtyOpen', 'settlePtyOpen', 'openSession'],
     });
     await fn({ openSession, window, calls });

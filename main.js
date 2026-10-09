@@ -151,7 +151,7 @@ if (app.isPackaged || process.env.FORCE_UPDATER) {
 }
 const {
   getMeta, getAllMeta, toggleStar, setName, setArchived,
-  isCachePopulated, getAllCached, getCachedByFolder, getCachedByParent, getCachedFolder, getCachedSession, upsertCachedSessions,
+  isCachePopulated, getAllCached, getCachedByFolder, getCachedByParent, getCachedFolder, getCachedSession, upsertCachedSessions, setCachedContinuationIndex,
   deleteCachedSession, deleteCachedFolder, replaceSessionMetrics, touchCachedModified,
   getFolderMeta, getAllFolderMeta, setFolderMeta,
   upsertSearchEntries, updateSearchTitle, deleteSearchSession, deleteSearchFolder, deleteSearchType,
@@ -489,7 +489,7 @@ sessionCache.init({
     deleteCachedFolder, getCachedByFolder, upsertCachedSessions, deleteCachedSession, replaceSessionMetrics, touchCachedModified,
     deleteSearchFolder, deleteSearchSession, upsertSearchEntries,
     setFolderMeta, getFolderMeta, getAllFolderMeta, getAllMeta, getAllCached, getSetting, getMeta, setName,
-    isInitialScanComplete, setInitialScanComplete, getCachedMissingEntrypoint, setCachedEntrypoints, getCachedSession,
+    isInitialScanComplete, setInitialScanComplete, getCachedMissingEntrypoint, setCachedEntrypoints, getCachedSession, setCachedContinuationIndex,
   },
 });
 const { readSessionFile, readFolderFromFilesystem, refreshFolder, reconcileCacheFromFilesystem,
@@ -3139,6 +3139,9 @@ const localTranscriptTracker = createLocalTranscriptTracker({ hasPty: sessionHas
 
 // see .ai/contexts/cli-session-state.md ("Live elsewhere")
 ipcMain.handle('session-live-elsewhere', (_event, sessionId) => cliSessionState.liveElsewhere(sessionId, sessionHasPty, ptyPids));
+ipcMain.handle('session-continuations', (_event, sessionId) => sessionCache.resolveSessionContinuations(sessionId, {
+  getSessionLiveElsewhere: id => cliSessionState.liveElsewhereChecked(id, sessionHasPty, ptyPids),
+}));
 ipcMain.handle('sessions-live-elsewhere', (_event, sessionIds) => cliSessionState.liveElsewhereMany(sessionIds, sessionHasPty, ptyPids));
 
 // see .ai/contexts/bg-agents.md

@@ -20,8 +20,10 @@ const SAVED = [
 function setup() {
   const dom = new JSDOM('<!DOCTYPE html><body></body>', { runScripts: 'outside-only' });
   const ctx = dom.getInternalVMContext();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/resume-guard.js'), 'utf8'), ctx);
   const settings = { global: { openWorkingSet: SAVED } };
   dom.window.api = {
+    getSessionContinuations: async () => ({ candidates: [], unresolved: false, continued: false }),
     getSetting: async (key) => JSON.parse(JSON.stringify(settings[key] || null)),
     setSetting: async (key, value) => { settings[key] = JSON.parse(JSON.stringify(value)); },
   };
@@ -44,7 +46,7 @@ function setup() {
   `, ctx);
   const fns = loadAppFunctions(ctx, {
     functions: ['persistWorkingSet', 'pendingRestoreEntries', 'runRestore'],
-    declarations: ['skippedWorkingSetEntries', 'restoreSavedIndex', 'restoreAwaitingConsent', 'restoreInFlight'],
+    declarations: ['skippedWorkingSetEntries', 'restoreSavedIndex', 'restoreAwaitingConsent', 'restoreInFlight', 'restoreIndexingDone'],
   });
   vm.runInContext(`restoreSavedIndex = new Map(${JSON.stringify(SAVED.map((item, i) => [item.sessionId, i]))});`, ctx);
   const stored = () => settings.global.openWorkingSet.map(i => i.sessionId);

@@ -9,6 +9,7 @@ const { encodeProjectPath, decodeProjectFolderBestEffort } = require('./encode-p
 const { parseFolderKey, joinFolderKey } = require('./remote-hosts');
 const { isPanelShellSession } = require('./panel-terminal-target');
 const { SETTING_DEFAULTS } = require('./public/setting-defaults');
+const { scanContinuationIndex, resolveContinuations, validId } = require('./session-continuations');
 
 /**
  * Session cache module.
@@ -19,7 +20,7 @@ let deleteCachedFolder, getCachedByFolder, upsertCachedSessions, deleteCachedSes
 let deleteSearchFolder, deleteSearchSession, upsertSearchEntries;
 let setFolderMeta, getFolderMeta, getAllFolderMeta, getAllMeta, getAllCached, getSetting, getMeta, setName;
 let isInitialScanComplete, setInitialScanComplete;
-let getCachedMissingEntrypoint, setCachedEntrypoints, getCachedSession;
+let getCachedMissingEntrypoint, setCachedEntrypoints, getCachedSession, setCachedContinuationIndex;
 let entrypointBackfill = null;
 
 function init(ctx) {
@@ -50,6 +51,7 @@ function init(ctx) {
   setInitialScanComplete = ctx.db.setInitialScanComplete;
   getCachedMissingEntrypoint = ctx.db.getCachedMissingEntrypoint;
   getCachedSession = ctx.db.getCachedSession;
+  setCachedContinuationIndex = ctx.db.setCachedContinuationIndex;
   setCachedEntrypoints = ctx.db.setCachedEntrypoints;
   entrypointBackfill = null;
 }
@@ -237,6 +239,7 @@ function refreshFolder(folder, opts = {}) {
     filesToScan = enumerateSessionFiles(folderPath);
   }
 
+  let continuationBytesLeft = 1024 * 1024;
   const currentIds = new Set();
   let changed = false;
 
@@ -287,9 +290,16 @@ function refreshFolder(folder, opts = {}) {
       // EXISTING -- header-only refresh.
       const h = readSessionDisplayHeader(filePath, { parentSessionId });
       if (h) {
+        let continuationIndex = cachedEntry.continuationIndex;
+        if (parentSessionId || cachedEntry.parentSessionId) continuationIndex = null;
+        else if (continuationBytesLeft) {
+          continuationIndex = scanContinuationIndex(filePath, cachedEntry.sessionId, continuationIndex, continuationBytesLeft);
+          continuationBytesLeft = 0;
+        }
         // Merge: keep cached body/messageCount/created, overlay fresh display fields.
         const merged = {
           ...cachedEntry,
+          continuationIndex,
           folder, projectPath,
           summary: h.summary || cachedEntry.summary,
           firstPrompt: h.firstPrompt || cachedEntry.firstPrompt,
@@ -1069,7 +1079,44 @@ function populateCacheViaWorker() {
   return populatePromise;
 }
 
+async function resolveSessionContinuations(sessionId, { chunkBytes = 1024 * 1024, getSessionLiveElsewhere } = {}) {
+  if (!Number.isSafeInteger(chunkBytes) || chunkBytes < 1) throw new RangeError('chunkBytes must be a positive integer');
+  let diskEntries;
+  return resolveContinuations(sessionId, async id => {
+    if (!validId(id)) return null;
+    const row = getCachedSession?.(id);
+    if (!row) {
+      const { alias } = parseFolderKey(getCachedSession?.(sessionId)?.folder || '');
+      if (alias === null && getSessionLiveElsewhere) {
+        const checked = await getSessionLiveElsewhere(id);
+        if (!checked?.known) return null;
+        if (checked.live) return { index: { ids: [] } };
+      }
+      const root = alias === null ? PROJECTS_DIR : remoteRoots.get(alias);
+      diskEntries ||= fs.promises.readdir(root, { recursive: true, withFileTypes: true });
+      const entries = await diskEntries;
+      if (entries.some(entry => entry.isFile() && entry.name === id + '.jsonl')) return { waitingForIndex: true };
+      return entries.some(entry => entry.isSymbolicLink()) ? null : { missing: true };
+    }
+    if (row.parentSessionId) return null;
+    const file = resolveJsonlPath(resolveFolderDir(row.folder), { ...row, folder: '.' });
+    const stat = fs.statSync(file);
+    let serialized = row.continuationIndex, index;
+    try { index = JSON.parse(serialized); } catch {}
+    if (index?.format !== 3 || !index.complete || index.bytes !== stat.size || index.mtime !== stat.mtime.toISOString()) {
+      do {
+        serialized = scanContinuationIndex(file, id, serialized, chunkBytes);
+        index = JSON.parse(serialized);
+        await new Promise(resolve => setImmediate(resolve));
+      } while (!index.complete && index.bytes < index.size);
+      setCachedContinuationIndex(id, serialized);
+    }
+    return { index, modified: getCachedSession(id)?.modified || row.modified };
+  });
+}
+
 module.exports = {
+  resolveSessionContinuations,
   init,
   readSessionFile,
   readFolderFromFilesystem,

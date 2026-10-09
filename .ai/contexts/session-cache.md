@@ -1671,3 +1671,79 @@ search_fts USING fts5(id, type, folder, title, body, tokenize='trigram')
 search_map(id PK, type, folder)   -- backref for FTS delete
 settings(key PK, value JSON)
 ```
+
+## Continuation index (#518B)
+
+`session_cache.continuationIndex` is nullable JSON with `format:3`, `ids`,
+`bytes`, `complete`, `mtime` and `unresolved`. Schema reconciliation adds the
+column without wiping old rows. Full transcript scans collect links while
+already parsing the file, including worker scans. Missing or older-format
+indexes are rebuilt lazily, including format-2 indexes that marked a mere
+`continued-in` mention in an unrelated malformed or oversized record unresolved.
+
+Header-only refresh skips subagent continuation indexes and shares a 1 MiB
+synchronous continuation budget across all changed parent files in that refresh.
+Other files retain their stale index until a later refresh or resume lookup.
+Existing display-header and SDK-entrypoint reads keep their own budgets.
+
+`resolveSessionContinuations` verifies format, size and mtime before trusting
+an index. A complete fresh index requires only stat. A legacy, incomplete or
+stale index is read in 1 MiB chunks, yielding with `setImmediate` between chunks,
+with no total scan cap. Tests can inject smaller `chunkBytes`. Persistence uses
+`setCachedContinuationIndex`, which updates only that column, preserving display
+fields written by a concurrent refresh; it does not upsert an old row snapshot.
+
+When a target has no cache row, resolution lazily inventories transcript filenames
+recursively under the source session's projects root (or that host's mirror root).
+This asynchronous directory inventory is shared within one resolution and reads
+no transcript contents. A file found anywhere in that root remains unresolved
+until indexed; resolution does not index it on demand. Directory read failures
+or symbolic links that may hide files also keep absence unconfirmed.
+For a local target without a cache row, the IPC also supplies the existing
+CLI `liveElsewhereChecked` lookup. A live descriptor keeps the target as a terminal
+candidate even before its first transcript record exists; `known:false`, including
+an unreadable descriptor directory, keeps resolution unresolved. A confirmed
+`known:true, live:null` result permits the disk inventory to check absence.
+Remote mirror targets never query local CLI descriptors.
+Only a target absent from the cache, liveness lookup and inventory is marked missing.
+The graph drops that target if its parent has another existing continuation.
+If every child is confirmed missing, that parent remains unresolved, including
+inside a longer chain: silently resuming a discontinued branch is unsafe, and
+manual opening already offers an explicit original-id choice. Cached rows with
+missing or unreadable transcripts retain the existing unresolved behaviour.
+
+Full-scan and chunk indexes both carry `version:3`, `size`, `sealedIds`, a bounded base64
+`pending` line, and the last 64 indexed bytes as hexadecimal `tail`. The tail is
+verified before reusing a cursor after growth; mismatch, shrink or a same-size
+mtime change starts at byte zero. This is a local tail check, not a proof that
+an arbitrary rewrite preserved the entire prefix. Full reads retain the same
+cursor witness and tail state, so the first scan after an append reads only
+the appended bytes and the bounded witness. Unterminated valid records remain
+tentative until sealed by a newline; partial tails are reprocessed on append.
+
+Lines are retained up to 1 MiB. Oversized records are ignored by both continuation
+indexers; chunk scans carry `skipLine` until the newline, including across appends.
+Actual CLI continuation records are small bookkeeping records. Malformed lines
+only hold resolution when they match `"type"\s*:\s*"continued-in"`; an unrelated
+mention of the word does not. Valid continuation records with invalid targets
+also remain unresolved. Partial tails remain buffered for a
+later append; tail errors are recomputed rather than carried forward forever.
+No transcript content is sent through the IPC, only candidate ids and activity
+times.
+
+A disk-present target without a cache row returns `waitingForIndex` with the
+unresolved graph. Automatic restore uses this to show a waiting notice instead
+of a continuation-choice notice. `markRestoreIndexingDone` reloads projects and
+retries held continuation entries, including after the ordinary restore planner
+has settled. If completion arrived during an in-flight resolution before it could
+be held, that restore pass notices completion and performs the same retry when
+it returns. Passes starting after completion do not schedule another retry.
+It invalidates their startup lookup promises before resolving again,
+persists the resolved id and active state, and consumes each retry once. A failed
+project reload leaves retries available for the next completion event. A manual
+open cancels automatic retry through `continuationRetryCancelled`; a remembered
+automatic open does not. The separate `sessionOpenedOutsideRestore` guard keeps
+its original behaviour: any open outside working-set restore cancels the planner,
+including the automatic remembered open on a renderer reload. Entries still
+ambiguous after indexing retain the sidebar-choice notice. Entries still unindexed
+after the retry name that state and offer a manual sidebar retry.

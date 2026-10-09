@@ -160,6 +160,7 @@ let restorePlanner = null;
 let restoreMode = 'off';
 let restoreIndexingDone = false;
 let sessionOpenedOutsideRestore = false;
+let continuationRetryCancelled = false;
 
 // see .ai/contexts/cli-session-state.md ("Live elsewhere")
 const skippedWorkingSetEntries = new Map();
@@ -188,10 +189,10 @@ function persistWorkingSet() {
       });
     }
     const held = [...skippedWorkingSetEntries.values(), ...pendingRestoreEntries()]
-      .filter(({ item }) => !openSessions.has(item.sessionId))
+      .filter(({ item, keepAttached }) => !openSessions.has(item.sessionId) || (keepAttached && openSessions.get(item.sessionId).attach))
       .sort((a, b) => a.index - b.index);
-    for (const { item, index } of held) {
-      set.splice(Math.min(index, set.length), 0, { sessionId: item.sessionId, projectPath: item.projectPath, active: false });
+    for (const { item, index, keepAttached } of held) {
+      set.splice(Math.min(index, set.length), 0, { sessionId: item.sessionId, projectPath: item.projectPath, active: !!keepAttached && item.sessionId === activeSessionId });
     }
     global.openWorkingSet = set;
     await window.api.setSetting('global', global);
@@ -218,32 +219,54 @@ function schedulePersistWorkingSet() {
   }, 500);
 }
 
-async function runRestore(list) {
+async function runRestore(list, { retryAfterIndexing = !restoreIndexingDone } = {}) {
   const pending = list.filter(item => sessionMap.has(item.sessionId) && !openSessions.has(item.sessionId));
   for (const item of pending) restoreInFlight.set(item.sessionId, item);
   const skippedNow = [];
   try {
     const liveById = await liveElsewhereMany(pending.map(item => item.sessionId), { api: window.api });
     for (const [position, item] of list.entries()) {
-      const s = sessionMap.get(item.sessionId);
+      let s = sessionMap.get(item.sessionId);
       if (!s || openSessions.has(item.sessionId)) {
         restoreInFlight.delete(item.sessionId);
         continue;
       }
       // Resume with the project's current "new session" defaults, exactly like a
       // manual session relaunch — not options frozen from a previous launch.
-      const live = liveById[item.sessionId] || null;
+      const originalId = item.sessionId;
+      const originalSession = s;
+      let waitingForIndex = false;
+      s = await resolveResumeSession({ ...s, projectPath: item.projectPath }, { automatic: true, api: window.api, confirm: msg => window.confirm(msg), resolutions: window._startupResumeResolutions, onHold: reason => { waitingForIndex = reason.waitingForIndex; } });
+      if (!s) {
+        const index = restoreSavedIndex.has(originalId) ? restoreSavedIndex.get(originalId) : position;
+        skippedWorkingSetEntries.set(originalId, { item, index, retryContinuation: retryAfterIndexing });
+        skippedNow.push({ session: originalSession, continuation: true, waitingForIndex, retryAfterIndexing });
+        restoreInFlight.delete(originalId);
+        continue;
+      }
+      if (s.sessionId !== originalId) {
+        restoreSavedIndex.set(s.sessionId, restoreSavedIndex.get(originalId) ?? position);
+        skippedWorkingSetEntries.delete(originalId);
+        item.sessionId = s.sessionId;
+      }
+      let live = liveById[originalId] || null;
+      if (s.sessionId !== originalId) {
+        try { live = await window.api.getSessionLiveElsewhere(s.sessionId); } catch { live = null; }
+      }
       let opened;
       try {
-        opened = await openSession(s, undefined, { automatic: true, live });
+        opened = await openSession(s, undefined, { automatic: true, live, continuationResolved: true, allowBgAttach: s.sessionId !== originalId });
       } finally {
-        restoreInFlight.delete(item.sessionId);
+        restoreInFlight.delete(originalId);
       }
       if (opened === false) {
         const index = restoreSavedIndex.has(item.sessionId) ? restoreSavedIndex.get(item.sessionId) : position;
         skippedWorkingSetEntries.set(item.sessionId, { item, index });
-        skippedNow.push({ session: s, live });
+        if (live) skippedNow.push({ session: s, live });
         continue;
+      }
+      if (s.sessionId !== originalId && openSessions.get(s.sessionId)?.attach) {
+        skippedWorkingSetEntries.set(s.sessionId, { item, index: restoreSavedIndex.get(s.sessionId), keepAttached: true });
       }
       await new Promise(r => setTimeout(r, RESTORE_STAGGER_MS));
     }
@@ -255,6 +278,9 @@ async function runRestore(list) {
   const activeItem = list.find(i => i.active) || list[list.length - 1];
   if (activeItem && openSessions.has(activeItem.sessionId)) {
     showSession(activeItem.sessionId);
+  }
+  if (retryAfterIndexing && restoreIndexingDone && skippedNow.some(item => item.continuation) && !continuationRetryCancelled) {
+    await markRestoreIndexingDone();
   }
 }
 
@@ -387,16 +413,24 @@ function showNotRestoredNotice(unavailable) {
 }
 
 function showLiveElsewhereNotice(skipped) {
-  const pids = skipped.map(({ live }) => (live ? live.pid : '?')).join(', ');
-  const text = skipped.length === 1
-    ? `Not reopened: ${cleanDisplayName(skipped[0].session.name || skipped[0].session.aiTitle || skipped[0].session.summary) || skipped[0].session.sessionId} is live in pid ${pids}`
-    : `Not reopened: ${skipped.length} sessions live in pids ${pids}`;
-  showRestoreNotice('restore-live-elsewhere-toast', text);
+  const live = skipped.filter(item => !item.continuation);
+  const held = skipped.filter(item => item.continuation && !item.waitingForIndex);
+  const waiting = skipped.filter(item => item.waitingForIndex);
+  const label = ({ session }) => cleanDisplayName(session.name || session.aiTitle || session.summary) || session.sessionId;
+  const parts = [];
+  if (live.length === 1) parts.push('Not reopened: ' + label(live[0]) + ' is live in pid ' + (live[0].live?.pid || '?'));
+  else if (live.length) parts.push('Not reopened: ' + live.length + ' sessions live in pids ' + live.map(item => item.live?.pid || '?').join(', '));
+  if (waiting.length) parts.push('Not reopened: ' + waiting.map(label).join(', ') + ' is waiting for indexing. '
+    + (waiting.some(item => item.retryAfterIndexing) ? 'Restore will retry when indexing finishes' : 'Open it from the sidebar to retry'));
+  if (held.length) parts.push('Not reopened: ' + held.map(item => label(item) + ' (' + item.session.sessionId + ')').join(', ')
+    + ' needs a continuation choice. Open it from the sidebar to choose.');
+  showRestoreNotice('restore-live-elsewhere-toast', parts.join('. '));
 }
 
 async function markRestoreIndexingDone() {
   restoreIndexingDone = true;
-  if (!restorePlanner || restorePlanner.isSettled()) return;
+  const held = () => [...skippedWorkingSetEntries.values()].filter(entry => entry.retryContinuation);
+  if ((!restorePlanner || restorePlanner.isSettled()) && !held().length) return;
   let reloaded = false;
   for (let attempt = 0; attempt < 2 && !reloaded; attempt++) {
     try {
@@ -404,7 +438,20 @@ async function markRestoreIndexingDone() {
       reloaded = true;
     } catch (e) { console.warn('[switchboard] reload after indexing failed', e); }
   }
-  if (reloaded) await tickRestorePlanner();
+  if (!reloaded) return;
+  await tickRestorePlanner();
+  const retry = held();
+  if (!retry.length || continuationRetryCancelled) return;
+  for (const entry of retry) {
+    entry.retryContinuation = false;
+    window._startupResumeResolutions?.delete(entry.item.sessionId);
+  }
+  document.getElementById('restore-live-elsewhere-toast')?.remove();
+  restoringWorkingSet = true;
+  try {
+    await runRestore(retry.map(entry => entry.item), { retryAfterIndexing: false });
+  } finally { restoringWorkingSet = false; }
+  await persistWorkingSet();
 }
 
 async function maybeRetryRestoreWorkingSet() {
@@ -1340,8 +1387,26 @@ async function showTerminalHeader(session) {
 
 // Terminal lifecycle (createTerminalEntry, destroySession, showSession, setupDragAndDrop) → terminal-manager.js
 
-async function openSession(session, customOptions, { automatic = false, live } = {}) {
+async function openSession(session, customOptions, { automatic = false, live, continuationResolved = false, allowBgAttach = false } = {}) {
   if (!restoringWorkingSet) sessionOpenedOutsideRestore = true;
+  if (!automatic) continuationRetryCancelled = true;
+  if (!continuationResolved && customOptions?.type !== 'attach' && (!openSessions.has(session.sessionId) || openSessions.get(session.sessionId).closed)) {
+    const originalId = session.sessionId;
+    session = await resolveResumeSession(session, { automatic, api: window.api, confirm: msg => window.confirm(msg), resolutions: window._startupResumeResolutions });
+    if (!session) return false;
+    if (session.sessionId !== originalId) {
+      live = undefined;
+      allowBgAttach = true;
+      const held = skippedWorkingSetEntries.get(originalId);
+      if (held || restoreSavedIndex.has(originalId)) {
+        restoreSavedIndex.set(session.sessionId, held?.index ?? restoreSavedIndex.get(originalId));
+      }
+      if (held) {
+        skippedWorkingSetEntries.set(session.sessionId, { ...held, item: { ...held.item, sessionId: session.sessionId } });
+      }
+      skippedWorkingSetEntries.delete(originalId);
+    }
+  }
   const { sessionId, projectPath } = session;
 
   // If already open, handle closed-session cleanup or just show it
@@ -1356,7 +1421,7 @@ async function openSession(session, customOptions, { automatic = false, live } =
   }
 
   // see .ai/contexts/cli-session-state.md ("Live elsewhere") and .ai/contexts/bg-agents.md ("Attach")
-  const verdict = customOptions?.type === 'attach' ? true : await guardResume(session, { automatic, live, api: window.api, confirm: (msg) => window.confirm(msg) });
+  const verdict = customOptions?.type === 'attach' ? true : await guardResume(session, { automatic, live, allowBgAttach, api: window.api, confirm: (msg) => window.confirm(msg) });
   if (verdict === false) return false;
   if (verdict && typeof verdict === 'object' && verdict.attach) {
     customOptions = { type: 'attach', jobId: verdict.attach, cwd: verdict.cwd || projectPath };
@@ -1387,6 +1452,13 @@ async function openSession(session, customOptions, { automatic = false, live } =
   }
   if (result.reattached) entry.attach = !!result.attach;
   skippedWorkingSetEntries.delete(sessionId);
+  if (allowBgAttach && entry.attach) {
+    skippedWorkingSetEntries.set(sessionId, {
+      item: { sessionId, projectPath },
+      index: restoreSavedIndex.get(sessionId) ?? Number.MAX_SAFE_INTEGER,
+      keepAttached: true,
+    });
+  }
   syncPtySizeAfterOpen(entry, result);
   if (typeof setSessionMcpState === 'function') setSessionMcpState(sessionId, result.mcpState, result.mcpError);
   setSessionSandboxed(sessionId, result.sandbox);
@@ -1639,23 +1711,21 @@ setTimeout(() => {
 // Let the settings panel push updated key bindings live (no restart needed).
 window._applyShortcuts = (stored) => setAppShortcuts(stored);
 
-loadProjects().then(async () => {
-  // Restore grid view preference before opening sessions so they enter grid mode
-  if (localStorage.getItem('gridViewActive') === '1') {
-    showGridView();
-  }
-  // Restore active session after reload (sessionStorage — lost on full restart).
-  // Must be awaited so openSessions is populated before restoreWorkingSet runs its
-  // !openSessions.has(id) filter — otherwise the session can pass the filter and
-  // be opened a second time (duplicate PTY / duplicate claude --resume).
-  if (activeSessionId && !openSessions.has(activeSessionId)) {
-    const session = sessionMap.get(activeSessionId);
-    if (session) await openSession(session, undefined, { automatic: true });
-  }
-  // Restore working set (persisted across full restarts via global settings)
-  await restoreWorkingSet();
-  restoreAgentsViewAtStartup();
-});
+// see .ai/contexts/cli-session-state.md ("Conversation continuations")
+async function restoreStartupSessions() {
+  window._startupResumeResolutions = new Map();
+  try {
+    if (localStorage.getItem('gridViewActive') === '1') showGridView();
+    if (activeSessionId && !openSessions.has(activeSessionId)) {
+      const session = sessionMap.get(activeSessionId);
+      if (session) await openSession(session, undefined, { automatic: true });
+    }
+    await restoreWorkingSet();
+    restoreAgentsViewAtStartup();
+  } finally { window._startupResumeResolutions = null; }
+}
+
+loadProjects().then(restoreStartupSessions);
 
 // Live-reload sidebar when filesystem changes are detected
 let projectsChangedTimer = null;

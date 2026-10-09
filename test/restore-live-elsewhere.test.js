@@ -47,6 +47,7 @@ function setup({ savedSet, liveIds, batchFails = false }) {
   const liveQueries = { single: [], batch: [] };
 
   dom.window.api = {
+    getSessionContinuations: async () => ({ candidates: [], unresolved: false, continued: false }),
     getSetting: async (key) => JSON.parse(JSON.stringify(settings[key] || null)),
     setSetting: async (key, value) => { settings[key] = JSON.parse(JSON.stringify(value)); },
     getSessionLiveElsewhere: async (id) => { liveQueries.single.push(id); return liveIds.includes(id) ? LIVE : null; },
@@ -88,7 +89,7 @@ function setup({ savedSet, liveIds, batchFails = false }) {
     function schedulePersistWorkingSet() {}
     function pollActiveSessions() {}
   `, ctx);
-  vm.runInContext(topLevelDeclarations(APP_SRC, ['LIVE_ELSEWHERE_NOTICE_MS', 'skippedWorkingSetEntries', 'restoreSavedIndex', 'restoreAwaitingConsent', 'restoreInFlight'])
+  vm.runInContext(topLevelDeclarations(APP_SRC, ['LIVE_ELSEWHERE_NOTICE_MS', 'skippedWorkingSetEntries', 'restoreSavedIndex', 'restoreAwaitingConsent', 'restoreInFlight', 'restoreIndexingDone', 'continuationRetryCancelled'])
     .replace(/^const /gm, 'var ').replace(/^let /gm, 'var '), ctx);
   for (const name of ['persistWorkingSet', 'pendingRestoreEntries', 'runRestore', 'openSession']) {
     vm.runInContext(functionSource(APP_SRC, name), ctx);

@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const { StringDecoder } = require('string_decoder');
+const { continuationId } = require('./session-continuations');
 
 /** Subagent transcripts land under <folder>/<parentSessionId>/subagents/agent-<agentId>.jsonl.
  *  We surface them as first-class rows with a synthetic sessionId so they're addressable
@@ -166,7 +167,8 @@ function readSessionFile(filePath, folder, projectPath, opts = {}) {
   const cutoff = opts.dedupeSinceTimestamp || null;
   try {
     const stat = fs.statSync(filePath);
-    const content = fs.readFileSync(filePath, 'utf8');
+    const fileBytes = fs.readFileSync(filePath);
+    const content = fileBytes.toString('utf8');
     const lines = content.split('\n').filter(Boolean);
     let summary = '';
     // Fallback title for a session whose only user turn is a slash command.
@@ -176,6 +178,11 @@ function readSessionFile(filePath, folder, projectPath, opts = {}) {
     let textContent = '';
     let slug = null;
     let scheduleSlug = null;
+    const continuationIds = new Set();
+    let continuationUnresolved = false;
+    let sealedContinuationIds = null;
+    let continuationInvalid = false;
+    let incompleteTail = false;
     let customTitle = null;
     let aiTitle = null;
     let agentId = null;
@@ -189,13 +196,26 @@ function readSessionFile(filePath, folder, projectPath, opts = {}) {
     // mtime without any actual activity, so mtime can't be the displayed time.
     let firstTimestamp = null;
     let lastTimestamp = null;
-    for (const line of lines) {
+    for (const [lineNumber, line] of lines.entries()) {
+      const continuationLine = Buffer.byteLength(line) <= 1024 * 1024;
+      const isTail = lineNumber === lines.length - 1 && !content.endsWith('\n');
+      if (isTail) {
+        sealedContinuationIds = [...continuationIds];
+        continuationInvalid = continuationUnresolved;
+      }
       // Per-line try/catch: a JSONL file being written concurrently by a live
       // Claude CLI session can have its tail captured mid-write — one truncated
       // line should not invalidate the whole file. Skip the malformed line and
       // keep parsing.
       let entry;
-      try { entry = JSON.parse(line); } catch { continue; }
+      try { entry = JSON.parse(line); } catch {
+        if (isTail) incompleteTail = true;
+        if (continuationLine && /"type"\s*:\s*"continued-in"/.test(line)) continuationUnresolved = true;
+        continue;
+      }
+      const continuation = continuationLine ? continuationId(entry, fileBase) : null;
+      if (continuation) continuationIds.add(continuation);
+      if (continuationLine && entry.type === 'continued-in' && entry.sessionId === fileBase && !continuation) continuationUnresolved = true;
       if (entry.timestamp) {
         // ISO-8601 UTC strings — lexicographic comparison is chronological
         if (!firstTimestamp || entry.timestamp < firstTimestamp) firstTimestamp = entry.timestamp;
@@ -279,6 +299,8 @@ function readSessionFile(filePath, folder, projectPath, opts = {}) {
       };
     }
 
+    const pending = fileBytes.subarray(fileBytes.lastIndexOf(10) + 1);
+    const skipLine = pending.length > 1024 * 1024;
     return {
       sessionId: fileBase, folder, projectPath,
       summary, firstPrompt: summary,
@@ -289,6 +311,13 @@ function readSessionFile(filePath, folder, projectPath, opts = {}) {
       modified: lastTimestamp || stat.mtime.toISOString(),
       fileMtime: stat.mtime.toISOString(),
       messageCount, textContent, slug, scheduleSlug, customTitle, aiTitle,
+      continuationIndex: JSON.stringify({ format: 3, version: 3, ids: [...continuationIds],
+        sealedIds: sealedContinuationIds ?? [...continuationIds], bytes: fileBytes.length,
+        complete: fileBytes.length === stat.size && (!incompleteTail || skipLine), size: fileBytes.length,
+        mtime: stat.mtime.toISOString(), unresolved: continuationUnresolved,
+        invalid: sealedContinuationIds === null ? continuationUnresolved : continuationInvalid,
+        skipLine, pending: skipLine ? '' : pending.toString('base64'),
+        tail: fileBytes.subarray(Math.max(0, fileBytes.length - 64)).toString('hex') }),
       bridgeSessionId,
       entrypoint: typedInTerminal ? 'cli' : (entrypoint ?? ''),
       dailyMetrics,

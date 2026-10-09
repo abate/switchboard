@@ -347,3 +347,60 @@ reader knows immediately to look outward rather than hunt a bug in Switchboard.
 
 Add one whenever you build on an undocumented external artefact; do not add one
 for an assumption a normal unit test can pin.
+
+## Conversation continuations
+
+CLI 2.1.289 and 2.1.295 append `{type:"continued-in", sessionId:<old>,
+continuedInSessionId:<new>, timestamp:...}` to the old transcript. These records
+can be mid-file and repeated; the new transcript has no back-link. This is an
+observed interface, pinned by an always-running synthetic fixture in
+`test/session-continuation-index.test.js`. That fixture proves parser agreement,
+not CLI drift; the test suite does not sample real conversation transcripts.
+
+`session-continuations` IPC calls `sessionCache.resolveSessionContinuations`.
+It traverses indexed links in record order, deduplicates terminal ids and bounds
+traversal to 32 edges / 128 node visits. Cycles, missing continuation rows/files
+and malformed continuation records return `unresolved`. Unrelated JSON parse
+failures and incomplete tails do not block resume. File scanning yields between
+chunks and has no total byte cap; chunk size only controls pacing.
+
+`resolveResumeSession` is shared by restore and sidebar clicks. An automatic
+restore selects exactly one terminal id. Several ids, unresolved graphs and
+failed lookups hold the saved entry and join the non-blocking restore notice,
+which names the original entry. A disk-present, unindexed continuation says
+it is waiting for indexing; held entries retry once when indexing finishes,
+even when the ordinary planner already settled. Ambiguous graphs ask for a
+sidebar choice. No continuation confirmation runs during automatic restore. Manual
+opens list each candidate's id and last activity before asking whether to open
+it. Declining all candidates offers an explicit original-session choice; an
+unresolved graph or failed lookup offers the same choice with a warning.
+Cancellation keeps the held entry. Remote sessions retain their attach behavior.
+
+`restoreStartupSessions` shares a map of lookup promises between the remembered
+active-session open and working-set restore. Each original id is resolved once
+during that startup pass; the map is discarded afterward so subsequent manual
+opens and indexing retries re-check the transcript.
+
+The remembered active-session `openSession` must be awaited before working-set
+restore starts. Continuation and live-elsewhere checks are asynchronous: before
+they finish, no terminal entry has been inserted into `openSessions`. Starting
+`restoreWorkingSet` concurrently can see the same session as unopened and launch
+a second PTY / duplicate `claude --resume`. Awaiting that first open also lets the
+working-set pass reuse its completed continuation lookup. The remembered open
+retains the existing renderer-reload behaviour: opening outside restore cancels
+the working-set planner, so it neither prompts nor resumes the other saved entries.
+The separate continuation-retry cancellation flag is set only by non-automatic
+opens; the automatic remembered open does not cancel a held indexing retry.
+
+For uncached local targets, continuation IPC uses `liveElsewhereChecked` before
+declaring the transcript missing. `known:false` keeps the graph unresolved when
+descriptors cannot be read. A live target remains
+a candidate before its first transcript record is written. An indexed sibling
+therefore cannot silently win over a live new continuation.
+
+After resolution, `runRestore` checks the final id's liveness; a background
+continuation requests the guard's existing `{attach}` verdict. Other live kinds
+retain their refusal/confirmation rules. Saved entries are rekeyed before
+opening; background continuation attachments retain the resolved entry in the
+working set. Ordinary attach tabs remain excluded. Part A, live descriptor
+rekeying while the original PTY runs, remains out of scope pending #477.

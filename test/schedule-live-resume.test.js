@@ -64,6 +64,7 @@ function setup(t, { sandbox = false } = {}) {
   const settings = { global: {} };
   const session = { sessionId: SID, projectPath: dir, name: 'Scheduled task' };
   dom.window.api = {
+    getSessionContinuations: async () => ({ candidates: [], unresolved: false, continued: false }),
     getSessionLiveElsewhere: (id) => handlers.get('session-live-elsewhere')(null, id),
     getSessionsLiveElsewhere: (ids) => handlers.get('sessions-live-elsewhere')(null, ids),
     openTerminal: async (...args) => { openTerminalCalls.push(args); return { ok: true }; },
@@ -101,7 +102,7 @@ function setup(t, { sandbox = false } = {}) {
   `, ctx);
   const app = loadAppFunctions(ctx, {
     functions: ['openSession', 'runRestore', 'pendingRestoreEntries', 'persistWorkingSet', 'showRestoreNotice', 'showLiveElsewhereNotice'],
-    declarations: ['LIVE_ELSEWHERE_NOTICE_MS', 'skippedWorkingSetEntries', 'restoreSavedIndex', 'restoreAwaitingConsent', 'restoreInFlight'],
+    declarations: ['LIVE_ELSEWHERE_NOTICE_MS', 'skippedWorkingSetEntries', 'restoreSavedIndex', 'restoreAwaitingConsent', 'restoreInFlight', 'restoreIndexingDone', 'continuationRetryCancelled'],
   });
   ctx.sessionMap.set(SID, session);
   t.after(() => {
