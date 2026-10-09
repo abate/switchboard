@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -42,6 +42,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -100,11 +102,14 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       # Full history + tags: only to find PREV_TAG for the notes' compare link.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -115,30 +120,7 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Create the draft once. Tolerate "already exists" so a re-run after a
-          # partial failure still proceeds to (re-)upload the assets.
-          gh release create "${GITHUB_REF_NAME}" \
-            --draft \
-            --title "${GITHUB_REF_NAME#v}" \
-            --notes "" \
-            || echo "release already exists — proceeding to asset upload"
-          # Upload each asset individually with retries. A single whole-batch
-          # `gh release create ... dist/*` aborts entirely when uploads.github.com
-          # returns an intermittent 401 on one asset (typically a .blockmap),
-          # leaving a partial release. Per-file + retry makes publishing reliable.
-          rc=0
-          for f in dist/*; do
-            [ -f "$f" ] || continue
-            ok=0
-            for i in 1 2 3 4 5; do
-              if gh release upload "${GITHUB_REF_NAME}" "$f" --clobber; then ok=1; break; fi
-              echo "::warning::upload $(basename "$f") attempt $i failed; retrying in 10s"
-              sleep 10
-            done
-            if [ "$ok" != 1 ]; then echo "::error::failed to upload $(basename "$f") after retries"; rc=1; fi
-          done
-          exit $rc
+        run: bash scripts/publish-release.sh
 
       # The step above creates the draft with --notes "": the body is the tag's
       # CHANGELOG.md section, and the step fails rather than write an empty one.
