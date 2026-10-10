@@ -1387,7 +1387,18 @@ async function showTerminalHeader(session) {
 
 // Terminal lifecycle (createTerminalEntry, destroySession, showSession, setupDragAndDrop) → terminal-manager.js
 
-async function openSession(session, customOptions, { automatic = false, live, continuationResolved = false, allowBgAttach = false } = {}) {
+const openingSessions = new Map();
+
+// see .ai/contexts/session-state.md ("Opening a session once")
+function openSession(session, ...args) {
+  const key = session.sessionId;
+  if (openingSessions.has(key)) return openingSessions.get(key);
+  const opening = openSessionNow(session, ...args).finally(() => openingSessions.delete(key));
+  openingSessions.set(key, opening);
+  return opening;
+}
+
+async function openSessionNow(session, customOptions, { automatic = false, live, continuationResolved = false, allowBgAttach = false } = {}) {
   if (!restoringWorkingSet) sessionOpenedOutsideRestore = true;
   if (!automatic) continuationRetryCancelled = true;
   if (!continuationResolved && customOptions?.type !== 'attach' && (!openSessions.has(session.sessionId) || openSessions.get(session.sessionId).closed)) {

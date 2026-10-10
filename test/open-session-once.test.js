@@ -1,3 +1,5 @@
+// see .ai/contexts/session-state.md ("Opening a session once")
+
 'use strict';
 
 const test = require('node:test');
@@ -41,7 +43,7 @@ function setup() {
   Object.assign(window.api, {
     openTerminal: (sessionId) => {
       openTerminalCalls.push(sessionId);
-      return new Promise((resolve) => releases.push(() => resolve({ ok: true })));
+      return new Promise((resolve) => releases.push(resolve));
     },
   });
   const project = {
@@ -52,13 +54,13 @@ function setup() {
   window.cachedAllProjects = [project];
   window.sessionMap.set('s1', { sessionId: 's1', projectPath: PROJECT });
   loadAppFunctions(ctx.context, {
-    declarations: ['continuationRetryCancelled'],
-    functions: ['openSession'],
+    declarations: ['continuationRetryCancelled', 'openingSessions'],
+    functions: ['openSession', 'openSessionNow'],
   });
   window.renderProjects(window.cachedProjects, true);
   const row = () => window.document.getElementById('si-s1');
-  const release = () => releases.splice(0).forEach((r) => r());
-  return { window, row, openTerminalCalls, release, destroy: () => ctx.destroy() };
+  const release = (result = { ok: true }) => releases.splice(0).forEach((r) => r(result));
+  return { window, row, openSession: (...args) => window.openSession(...args), openTerminalCalls, release, destroy: () => ctx.destroy() };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -84,6 +86,32 @@ test('a click after the open has finished shows the session without opening it a
     await settle();
     h.row().click();
     await settle();
+    assert.deepEqual(h.openTerminalCalls, ['s1']);
+  } finally { h.destroy(); }
+});
+
+test('a second open of the same session while the first runs gets the first one\'s result', async () => {
+  const h = setup();
+  try {
+    h.window.guardResume = async () => false;
+    const first = h.openSession(h.window.sessionMap.get('s1'));
+    const second = h.openSession(h.window.sessionMap.get('s1'));
+    assert.equal(await first, false);
+    assert.equal(await second, false, 'a caller reading the result sees the refusal, not undefined');
+    assert.deepEqual(h.openTerminalCalls, []);
+  } finally { h.destroy(); }
+});
+
+test('once an open has failed, the session can be opened again', async () => {
+  const h = setup();
+  try {
+    h.window.guardResume = async () => false;
+    assert.equal(await h.openSession(h.window.sessionMap.get('s1')), false);
+    h.window.guardResume = async () => true;
+    const opening = h.openSession(h.window.sessionMap.get('s1'));
+    await settle();
+    h.release();
+    await opening;
     assert.deepEqual(h.openTerminalCalls, ['s1']);
   } finally { h.destroy(); }
 });
