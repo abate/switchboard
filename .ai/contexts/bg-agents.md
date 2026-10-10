@@ -83,6 +83,15 @@ attaches/stops/respawns/deletes/dispatches through the CLI. User doc:
     check but before the CLI runs. This reduces stale-roster mistakes; it is
     not an atomic lock on the conversation.
 
+## Header counters
+
+`#agents-viewer-count` reads `N running · M finished`, plus ` · K external` when
+K > 0. `running` and `finished` count background jobs only (`agentJobIsLive`);
+`external` counts every interactive row that is not a finished job held by an
+interactive session (`jobState` set; that row counts as finished), which is live by definition
+(`agentIsLive`) and always listed, whatever the Finished filter says. The segment is
+absent at zero, so a roster without external sessions reads as before.
+
 ## Job states
 
 `JOB_STATES` in `bg-agents-roster.js` is `working`, `blocked`, `done`,
@@ -503,6 +512,14 @@ the client is killed. The call resolves on `close` so stdout is drained, or
   `id: null`, which only costs the row selection.
 - Liveness of interactive descriptors is pid-only (`isProcessAlive`): a
   reused pid shows an external session that is gone.
+- An interactive descriptor is External unless `ownProcessFilter` claims its pid:
+  a PTY pid of this instance, or a descendant of one or of the main process (the
+  roster's broad visibility rule; the resume and delete guards use a narrower one,
+  see cli-session-state.md). On
+  Windows and macOS the parent chain comes from a cached, asynchronous process
+  snapshot (`.ai/contexts/cli-session-state.md`, "Own descendants outside
+  Linux"), so the first roster after startup can list an own tab as External until
+  the snapshot lands and the view rebuilds.
 - A login shell whose rc files print to stdout is tolerated by the tolerant
   list parse, as long as the JSON array stays on its own lines; other noise
   (text on the same line as the JSON, a stray line that happens to parse as

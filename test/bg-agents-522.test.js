@@ -229,7 +229,8 @@ test(`[522r2] own live descriptor keeps the job row and explains Switchboard own
 }
 
 test('[522r2] includeOwnProcesses explicitly overrides ordinary own filtering for bridge lineage', { timeout: 9000 }, async (t) => {
-  fixture(t, { bridge: true, ownDescriptor: true });
+  const f = fixture(t, { bridge: true, ownDescriptor: true });
+  cliSessionState.init({ dir: path.join(f.dir, 'sessions'), activeSessions: new Map(), onIdle() {}, isProcessAlive: () => true, readProcStartMany: async () => new Map(), platform: 'linux', readParentPid: () => null });
   const pids = () => [PID];
   assert.equal((await cliSessionState.liveElsewhereChecked(BRIDGE, () => false, pids)).live, null);
   const checked = await cliSessionState.liveElsewhereChecked(BRIDGE, () => false, pids, { includeOwnProcesses: true });
