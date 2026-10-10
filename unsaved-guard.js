@@ -32,7 +32,7 @@ function createUnsavedGuard({ ipcMain, timeoutMs = DEFAULT_TIMEOUT_MS, logoffCan
     if (inflight) {
       if (inflight.reason === 'reload') {
         inflight.reason = reason;
-        try { win.webContents.send('unsaved-check-reason', inflight.id, reason); } catch { /* the check ends without it */ }
+        try { win.webContents.send('unsaved-check-reason', inflight.id, reason); } catch {}
       }
       return inflight.asked;
     }
@@ -96,7 +96,7 @@ function createUnsavedGuard({ ipcMain, timeoutMs = DEFAULT_TIMEOUT_MS, logoffCan
       }, logoffCancelMs);
       const wc = win.webContents;
       if (win.isDestroyed() || !wc || wc.isDestroyed()) return;
-      try { wc.send('exit-flush'); } catch { /* the window is going anyway */ }
+      try { wc.send('exit-flush'); } catch {}
     };
     win.on('query-session-end', () => endSession(false));
     win.on('session-end', () => endSession(true));
@@ -122,8 +122,11 @@ function createUnsavedGuard({ ipcMain, timeoutMs = DEFAULT_TIMEOUT_MS, logoffCan
       }
       if (reloading) return;
       reloading = true;
-      ask(win, 'reload').then((proceed) => {
+      const asked = ask(win, 'reload');
+      const check = inflight;
+      asked.then((proceed) => {
         reloading = false;
+        if (check && check.reason !== 'reload') return;
         if (!proceed || win.isDestroyed() || win.webContents.isDestroyed()) return;
         allowNextUnload = true;
         win.webContents.reload();
