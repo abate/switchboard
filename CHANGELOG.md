@@ -16,6 +16,7 @@ What changes for you in each release of Switchboard. How to write an entry: [doc
 - A double click on a session in the sidebar opens it once, instead of sometimes starting two terminals that resume the same conversation. (#539)
 - Quitting or closing the window saves the open sessions right away, so the next start restores the sessions that were open, not an empty or out-of-date list. (#479)
 - Closing the window or quitting no longer leaves Switchboard running when its window has stopped responding: the window closes as before, and once the system reports it not responding, or you close it again, it is closed anyway. A window that is only busy for a moment is left to close normally. (#540)
+- On Linux and Windows, `/clear` (or `/reset`, `/new`) in a session keeps the open terminal on its sidebar row, which now follows the new conversation, instead of listing that conversation as a separate session. The cleared conversation stays in the list as a past session, and a session quit after `/clear` before its first prompt comes back on restore as a new session in the same project. On macOS the new conversation is still listed apart. (#477)
 
 ## v0.0.92 — 2026-10-10
 
