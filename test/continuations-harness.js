@@ -71,8 +71,9 @@ function setup(t, graph, { live = {}, answer = false, savedEntries, chunkBytes }
   ctx.rows = [...rows.values()];
   vm.runInContext('rows.forEach(row => sessionMap.set(row.sessionId, row));', ctx);
   dom.window.showRestoreNotice = (_, text) => { dom.window.notice = text; };
+  dom.window.SETTING_DEFAULTS = require('../public/setting-defaults').SETTING_DEFAULTS;
   const app = loadAppFunctions(ctx, {
-    declarations: ['openingSessions', 'skippedWorkingSetEntries', 'restoreSavedIndex', 'restoreAwaitingConsent', 'restoreInFlight', 'restoreIndexingDone', 'continuationRetryCancelled'],
+    declarations: ['openingSessions', 'dormantWorkingSet', 'skippedWorkingSetEntries', 'restoreSavedIndex', 'restoreAwaitingConsent', 'restoreInFlight', 'restoreIndexingDone', 'continuationRetryCancelled'],
     functions: ['runRestore', 'openSession', 'openSessionNow', 'persistWorkingSet', 'pendingRestoreEntries', 'showLiveElsewhereNotice'],
   });
   return {
