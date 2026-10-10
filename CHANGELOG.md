@@ -4,6 +4,9 @@ What changes for you in each release of Switchboard. How to write an entry: [doc
 
 ## Unreleased
 
+### New
+- **Restore Sessions on Startup** has a new **Restore on click** option: the sessions open when Switchboard last closed are marked in the sidebar with an outlined dot, and each one is resumed only when you open it, by a click or with the previous/next session keys, instead of starting a `claude` process for every one at launch. **Don't restore** in a marked session's right-click menu removes it without starting it. (#441)
+
 ### Fixed
 - A double click on a session in the sidebar opens it once, instead of sometimes starting two terminals that resume the same conversation. (#539)
 
@@ -29,7 +32,6 @@ What changes for you in each release of Switchboard. How to write an entry: [doc
 ### New
 - An Agents view lists the sessions the Claude daemon runs in the background (`claude --bg`) and the interactive sessions running outside Switchboard, grouped by state or by project and worktree. Open it from the people icon in the sidebar or with Ctrl+Shift+A (Cmd+Shift+A on macOS); attach to a live one by double click, stop, respawn or delete one, and start a new one with New agent. A background session that is running shows a `bg` badge in the sidebar and is attached instead of resumed. (#374)
 - **Archive folder** on a project header opens a dialog that archives the folder's sessions and disables its enabled schedules, each optional, and hides the folder with its worktrees. The folder comes back, with its settings, when you add it again or a new session starts in it, and then offers to turn back on the schedules the archive disabled. (#473)
-- **Restore Sessions on Startup** has a new **Restore on click** option: the sessions open when Switchboard last closed are marked in the sidebar with an outlined dot, and each one is resumed only when you click it, instead of starting a `claude` process for every one at launch. **Don't restore** in a marked session's right-click menu removes it without starting it. (#441)
 ### Changed
 - New scheduled task runs appear under a header named after their schedule, even with only one visible run. Schedules that use the same prompt stay separate; older runs keep their existing grouping. An old expansion choice is inherited only when it identifies one schedule across projects and hosts. (#489)
 - Markdown files open formatted in Touched, with a toggle back to the source that is remembered. (#472)
