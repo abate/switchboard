@@ -18,6 +18,7 @@ function setup() {
     console,
     Promise,
     openSessions: new Map(),
+    pendingSessions: new Map(),
     activeSessionId: null,
     document: { getElementById: () => null },
     skippedWorkingSetEntries: new Map(),
@@ -33,7 +34,7 @@ function setup() {
   const fns = loadAppFunctions(context, {
     declarations: ['restoringWorkingSet', 'persistWorkingSetTimer', '_persistChain', 'exitingApp', 'exitingAppTimer',
       'persistSkippedWhileExiting', 'savedWorkingSetRead', 'EXIT_FLUSH_GRACE_MS', 'restorePlanner', 'restoreSavedIndex',
-      'restoreAwaitingConsent', 'restoreInFlight', 'restoreMode'],
+      'restoreAwaitingConsent', 'restoreInFlight', 'restoreMode', 'dormantWorkingSet'],
     functions: ['persistWorkingSet', 'pendingRestoreEntries', 'schedulePersistWorkingSet', 'flushStateForExit', 'restoreWorkingSet'],
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'setting-defaults.js'), 'utf8'), context);
