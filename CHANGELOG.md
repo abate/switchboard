@@ -11,6 +11,7 @@ What changes for you in each release of Switchboard. How to write an entry: [doc
 ### Fixed
 - In a sandboxed session, a repository or a `.claude` folder below an Additional Directory that is a symbolic link now has its Git config, hooks and Claude settings read-only, like one below a plain directory. Before, they were writable from inside the sandbox. Such a directory holding a `.claude` that is itself a symbolic link, or a repository Git cannot read, now refuses to start the session (status 125), as a plain directory already did, instead of starting it unprotected. (#538)
 - A double click on a session in the sidebar opens it once, instead of sometimes starting two terminals that resume the same conversation. (#539)
+- Quitting or closing the window saves the open sessions right away, so the next start restores the sessions that were open, not an empty or out-of-date list. (#479)
 
 ## v0.0.92 — 2026-10-10
 
