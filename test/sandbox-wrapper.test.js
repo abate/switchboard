@@ -586,6 +586,53 @@ test('sandbox wrapper: an opted-in skills in a project\'s .claude that links out
     }
   });
 
+test('sandbox wrapper: refuses an opted-in skills or agents that overlaps the target of a private ~/.claude entry or of ~/.claude.json',
+  { skip: !LINUX && 'linux only' }, () => {
+    const rig = makeRig({ recordArgs: true });
+    try {
+      const dir = path.join(rig.home, '.claude');
+      const flags = { SWITCHBOARD_SANDBOX_RW_SKILLS: '1' };
+      fs.mkdirSync(path.join(dir, 'skills', 'snaps'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'skills', 'snaps', 'snap.sh'), 'export A=1\n');
+      fs.symlinkSync(path.join(dir, 'skills', 'snaps'), path.join(dir, 'shell-snapshots'));
+      let res = rig.run(['--version'], flags);
+      assert.equal(res.status, 125, 'a private entry linked into skills must be refused');
+      assert.match(res.stderr, /shell-snapshots links to .*skills\/snaps, which overlaps .*skills/);
+      assert.equal(rig.run(['--version'], { ...flags, SWITCHBOARD_SANDBOX_RW_SKILLS: '' }).status, 0, 'flag off: launches');
+
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.mkdirSync(dir);
+      const dot = path.join(rig.home, 'dot');
+      fs.mkdirSync(path.join(dot, 'skills', 'se'), { recursive: true });
+      fs.writeFileSync(path.join(dot, 'skills', 'claude.json'), '{}\n');
+      fs.symlinkSync('../dot/skills', path.join(dir, 'skills'));
+      fs.symlinkSync('../dot/skills/se', path.join(dir, 'session-env'));
+      res = rig.run(['--version'], flags);
+      assert.equal(res.status, 125, 'a relative private link into the linked skills must be refused');
+      assert.match(res.stderr, /session-env links to/);
+
+      fs.rmSync(path.join(dir, 'session-env'));
+      fs.symlinkSync('dot/skills/claude.json', path.join(rig.home, '.claude.json'));
+      res = rig.run(['--version'], flags);
+      assert.equal(res.status, 125, 'a ~/.claude.json linked into skills must be refused');
+      assert.match(res.stderr, /\.claude\.json links to/);
+
+      fs.rmSync(path.join(rig.home, '.claude.json'));
+      fs.symlinkSync(rig.home + '/dot', path.join(dir, 'state'));
+      res = rig.run(['--version'], flags);
+      assert.equal(res.status, 125, 'a private entry whose target contains skills must be refused');
+      assert.match(res.stderr, /state links to/);
+
+      fs.rmSync(path.join(dir, 'state'));
+      fs.mkdirSync(path.join(dot, 'state'));
+      fs.symlinkSync(path.join(dot, 'state'), path.join(dir, 'state'));
+      res = rig.run(['--version'], flags);
+      assert.equal(res.status, 0, `a private link beside skills is fine\n${res.stderr}`);
+    } finally {
+      rig.cleanup();
+    }
+  });
+
 test('sandbox wrapper: refuses an opted-in skills or agents that is, or is inside, a path another entry keeps read-only',
   { skip: !LINUX && 'linux only' }, () => {
     const rig = makeRig({ recordArgs: true });
@@ -1709,6 +1756,8 @@ attempt skill-repo-new-claude 'mkdir -p "$C/skills/vendored/.claude" && echo evi
 attempt user-hook 'echo evil > "$C/hooks/evil.sh"'
 attempt user-command 'echo evil > "$C/commands/evil.md"'
 attempt user-agent 'echo evil > "$C/agents/evil.md"'
+attempt project-skill-write 'mkdir -p .claude/skills/p && echo ok > .claude/skills/p/SKILL.md'
+attempt project-settings 'echo evil > .claude/settings.json'
 `;
 
 test('sandbox wrapper: from inside a real sandbox, an opted-in skills linked to a repository is writable, and its git and .claude are not',
@@ -1727,6 +1776,8 @@ test('sandbox wrapper: from inside a real sandbox, an opted-in skills linked to 
       fs.mkdirSync(vendored);
       git(vendored, 'init', '-q');
       fs.symlinkSync(repo, path.join(C, 'skills'));
+      fs.mkdirSync(path.join(rig.proj, '.claude', 'skills'), { recursive: true });
+      fs.writeFileSync(path.join(rig.proj, '.claude', 'settings.json'), '{}\n');
 
       const res = rig.run([OPT_IN_ATTEMPTS], { SWITCHBOARD_SANDBOX_RW_SKILLS: '1' });
       assert.equal(res.status, 0, res.stderr);
@@ -1741,6 +1792,15 @@ test('sandbox wrapper: from inside a real sandbox, an opted-in skills linked to 
       assert.ok(gone(path.join(C, 'hooks', 'evil.sh')), `hooks must stay read-only\n${said}`);
       assert.ok(gone(path.join(C, 'commands', 'evil.md')), `commands must stay read-only\n${said}`);
       assert.ok(gone(path.join(C, 'agents', 'evil.md')), `agents must stay read-only without its flag\n${said}`);
+      assert.equal(read0(path.join(rig.proj, '.claude', 'skills', 'p', 'SKILL.md')), 'ok\n', `a project skill write must reach the host\n${said}`);
+      assert.equal(read0(path.join(rig.proj, '.claude', 'settings.json')), '{}\n', `project settings must stay read-only\n${said}`);
+
+      fs.mkdirSync(path.join(repo, 'snaps'));
+      fs.writeFileSync(path.join(repo, 'snaps', 'snap.sh'), 'export A=1\n');
+      fs.symlinkSync(path.join(repo, 'snaps'), path.join(C, 'shell-snapshots'));
+      const refused = rig.run(['echo evil > "$HOME/.claude/shell-snapshots/snap.sh"'], { SWITCHBOARD_SANDBOX_RW_SKILLS: '1' });
+      assert.equal(refused.status, 125, `a private entry linked into skills must refuse the launch\n${refused.stdout}`);
+      assert.equal(read0(path.join(repo, 'snaps', 'snap.sh')), 'export A=1\n', 'the linked snapshot must be unchanged');
     } finally {
       rig.cleanup();
     }

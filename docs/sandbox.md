@@ -225,6 +225,14 @@ directory's `.claude`, as session state:
   sandbox binds read-only (the node install, `$NVM_DIR`) lies inside the
   writable directory under another spelling, where the writable mount would
   cover it.
+- The launch is also refused when the target of a private entry
+  (`shell-snapshots`, `session-env`, `backups`, `state`) or of a
+  `~/.claude.json` that is a symbolic link is the writable directory, lies
+  inside it or contains it. The sandbox gives those entries a private copy, so
+  no mount of theirs is there to compare, while other sessions outside the
+  sandbox source the snapshots and session hooks and load the MCP servers of
+  `~/.claude.json`: written through the opted-in directory, they would run
+  unsandboxed.
 
 This gives up part of the protection: what the session writes there is loaded,
 and its scripts run, by every later session outside the sandbox, other

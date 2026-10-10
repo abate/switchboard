@@ -490,6 +490,7 @@ bind_user_claude_dir() {
       bind_projects_dir "$e"
     elif in_list "$name" "${USER_PRIVATE_ENTRIES[@]}"; then
       mount_op --tmpfs "" "$e"
+      [ -L "$e" ] && PRIVATE_LINKS+=("$e")
     elif [ -L "$e" ]; then
       mount_op --symlink "$(readlink "$e")" "$e"
       if in_list "$name" "${USER_STATE_ENTRIES[@]}"; then
@@ -725,6 +726,8 @@ check_opt_in_binds() {
   done
   [ "${#srcs[@]}" -gt 0 ] && mapfile -d '' out < <(readlink -m -z -- "${srcs[@]}")
   for j in "${!idx[@]}"; do reals[idx[j]]="${out[j]}"; done
+  local -a privs=()
+  [ "${#PRIVATE_LINKS[@]}" -gt 0 ] && mapfile -d '' privs < <(readlink -m -z -- "${PRIVATE_LINKS[@]}")
   for b in ${OPT_IN_BINDS[@]+"${OPT_IN_BINDS[@]}"}; do
     k="${b#*:}"; t="${M_DEST[k]}"; tr="${reals[k]}"
     for i in "${!reals[@]}"; do
@@ -737,6 +740,11 @@ check_opt_in_binds() {
     done
     for r in "${!PROTECTED_SEEN[@]}"; do
       case "$tr/" in "$r"/*) opt_in_refuse "$t" "$r" ;; esac
+    done
+    for j in "${!privs[@]}"; do
+      r="${privs[j]}"
+      case "$tr/" in "$r"/*) opt_in_refuse_private "$t" "${PRIVATE_LINKS[j]}" "$r" ;; esac
+      case "$r/" in "$tr"/*) opt_in_refuse_private "$t" "${PRIVATE_LINKS[j]}" "$r" ;; esac
     done
     for i in "${!reals[@]}"; do
       [ "${M_OP[i]}" = --ro-bind ] || continue
@@ -769,6 +777,10 @@ opt_in_refuse() {
   fail "refusing to launch: $1, which SWITCHBOARD_SANDBOX_RW_$(printf '%s' "${1##*/}" | tr a-z A-Z)=1 makes writable, is $where $2, which the sandbox keeps read-only; the session could change it through ${1##*/}. Give ${1##*/} a directory of its own, or turn the flag off for this session."
 }
 
+opt_in_refuse_private() {
+  fail "refusing to launch: $2 links to $3, which overlaps $1, which SWITCHBOARD_SANDBOX_RW_$(printf '%s' "${1##*/}" | tr a-z A-Z)=1 makes writable; the sandbox gives $2 a private copy, and the session could change the host's through ${1##*/}. Move $2's target out of ${1##*/}, or turn the flag off for this session."
+}
+
 opt_in_refuse_below() {
   fail "refusing to launch: $2, which the sandbox keeps read-only, lies inside $1, which SWITCHBOARD_SANDBOX_RW_$(printf '%s' "${1##*/}" | tr a-z A-Z)=1 makes writable; the session could change it through ${1##*/}. Move it out of ${1##*/}, or turn the flag off for this session."
 }
@@ -783,6 +795,7 @@ build_bwrap_args() {
   MISSING_DIRS=()
   GIT_WORKTREES=()
   OPT_IN_BINDS=()
+  PRIVATE_LINKS=()
   local d name i
   mount_op --dev "" /dev
   mount_op --proc "" /proc
@@ -825,6 +838,7 @@ build_bwrap_args() {
   bind_user_claude_dir "$CLAUDE_DIR"
   # fd 9 carries the private copy; see claude_json_source.
   mount_op --file 9 "$CLAUDE_JSON"
+  [ -L "$CLAUDE_JSON" ] && PRIVATE_LINKS+=("$CLAUDE_JSON")
   for d in ${GIT_WORKTREES[@]+"${GIT_WORKTREES[@]}"}; do
     protect_git "$d"
   done
