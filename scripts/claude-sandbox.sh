@@ -503,7 +503,7 @@ bind_user_claude_dir() {
         bind_state_link_target "$e" "$kind"
         if [ -n "$STATE_LINK_TARGET" ] && in_list "$name" ${OPT_IN_ENTRIES[@]+"${OPT_IN_ENTRIES[@]}"}; then
           OPT_IN_BINDS+=("user:$((${#M_DEST[@]} - 1))")
-          protect_tree "$STATE_LINK_TARGET" nocreate
+          protect_tree "$STATE_LINK_TARGET" repo
         fi
       else
         protect_link_target "$e"
@@ -512,7 +512,7 @@ bind_user_claude_dir() {
       mount_op --bind "$e" "$e"
       if [ -d "$e" ] && in_list "$name" ${OPT_IN_ENTRIES[@]+"${OPT_IN_ENTRIES[@]}"}; then
         OPT_IN_BINDS+=("user:$((${#M_DEST[@]} - 1))")
-        protect_tree "$e" nocreate
+        protect_tree "$e" repo
       fi
     else
       mount_op --ro-bind "$e" "$e"
@@ -621,6 +621,9 @@ protect_repo_root() {
     mount_op --ro-bind "$d/.git" "$d/.git"
     GIT_WORKTREES+=("$d")
   fi
+  if [ "$create" = repo ]; then
+    if [ -e "$d/.git" ]; then create=create; else create=nocreate; fi
+  fi
   protect_claude_dir "$d/.claude" "$create"
 }
 
@@ -715,13 +718,13 @@ pin_protected_paths() {
 # see docs/sandbox.md, "Writable skills and agents"
 check_opt_in_binds() {
   [ "${#OPT_IN_BINDS[@]}" -gt 0 ] || return 0
-  local -a reals=()
-  local b k tr t i r v
+  local -a reals=() idx=() srcs=() out=()
+  local b k tr t i j r v
   for i in "${!M_DEST[@]}"; do
-    case "${M_OP[i]}" in
-      --bind|--ro-bind) reals[i]="$(readlink -m -- "${M_SRC[i]}")" ;;
-    esac
+    case "${M_OP[i]}" in --bind|--ro-bind) idx+=("$i"); srcs+=("${M_SRC[i]}") ;; esac
   done
+  [ "${#srcs[@]}" -gt 0 ] && mapfile -d '' out < <(readlink -m -z -- "${srcs[@]}")
+  for j in "${!idx[@]}"; do reals[idx[j]]="${out[j]}"; done
   for b in ${OPT_IN_BINDS[@]+"${OPT_IN_BINDS[@]}"}; do
     k="${b#*:}"; t="${M_DEST[k]}"; tr="${reals[k]}"
     for i in "${!reals[@]}"; do
@@ -734,6 +737,13 @@ check_opt_in_binds() {
     done
     for r in "${!PROTECTED_SEEN[@]}"; do
       case "$tr/" in "$r"/*) opt_in_refuse "$t" "$r" ;; esac
+    done
+    for i in "${!reals[@]}"; do
+      [ "${M_OP[i]}" = --ro-bind ] || continue
+      r="${reals[i]}"
+      case "$r" in "$tr"/*) ;; *) continue ;; esac
+      opt_in_access_at "$t${r#"$tr"}" ""
+      [ "${M_OP[OA_IDX]}" = --ro-bind ] || opt_in_refuse_below "$t" "$r"
     done
   done
 }
@@ -757,6 +767,10 @@ opt_in_refuse() {
   local where="inside"
   [ "$1" = "$2" ] && where="also"
   fail "refusing to launch: $1, which SWITCHBOARD_SANDBOX_RW_$(printf '%s' "${1##*/}" | tr a-z A-Z)=1 makes writable, is $where $2, which the sandbox keeps read-only; the session could change it through ${1##*/}. Give ${1##*/} a directory of its own, or turn the flag off for this session."
+}
+
+opt_in_refuse_below() {
+  fail "refusing to launch: $2, which the sandbox keeps read-only, lies inside $1, which SWITCHBOARD_SANDBOX_RW_$(printf '%s' "${1##*/}" | tr a-z A-Z)=1 makes writable; the session could change it through ${1##*/}. Move it out of ${1##*/}, or turn the flag off for this session."
 }
 
 # Fills BWRAP_ARGS from what exists now, and MISSING_DIRS with what must be
