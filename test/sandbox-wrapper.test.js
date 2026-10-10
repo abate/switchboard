@@ -1072,6 +1072,29 @@ test('sandbox wrapper: every .claude and repository below a bound directory is p
     }
   });
 
+test('sandbox wrapper: a repository and a .claude below an Additional Directory that is a link are protected',
+  { skip: !LINUX && 'linux only' }, () => {
+    const rig = makeRig({ recordArgs: true });
+    try {
+      fs.mkdirSync(path.join(rig.home, '.claude'));
+      const other = path.join(rig.root, 'other');
+      const sub = path.join(other, 'sub');
+      fs.mkdirSync(path.join(sub, '.claude'), { recursive: true });
+      git(sub, 'init', '-q');
+      const link = path.join(rig.root, 'link');
+      fs.symlinkSync(other, link);
+      const { status, stderr } = rig.run(['--version'], { SWITCHBOARD_SANDBOX_BINDS: link });
+      assert.equal(status, 0, stderr);
+      const ops = parseMounts(rig.lastBwrapArgs());
+      assert.equal(accessAt(ops, path.join(link, 'sub', 'file')), '--bind');
+      for (const p of [path.join(link, 'sub', '.git', 'config'), path.join(link, 'sub', '.claude', 'settings.json')]) {
+        assert.equal(accessAt(ops, p), '--ro-bind', `${p} must stay read-only`);
+      }
+    } finally {
+      rig.cleanup();
+    }
+  });
+
 test('sandbox wrapper: refuses a repository git cannot read, rather than guessing which paths to protect',
   { skip: !LINUX && 'linux only' }, () => {
     const rig = makeRig({ recordArgs: true });
